@@ -1,0 +1,46 @@
+# Xcode user-specific and generated files
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+
+# Node and Expo generated files
+node_modules/
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+.metro-health-check*
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+.env*.local
+*.tsbuildinfo
+
+# Expo prebuild output: generated from app.json when needed
+/ios
+/android
+
+# Native credentials
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.pem
+.DS_Store
+
+# Swift Package Manager
+.build/
+Packages/
+
+# CocoaPods
+Pods/
+
+# Fastlane output
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/
+fastlane/test_output/
