@@ -4,10 +4,14 @@
     "slug": "estimit",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "icon": "./assets/estimit-gem-icon.png",
+    "userInterfaceStyle": "dark",
     "ios": {
       "bundleIdentifier": "com.ryduzz.estimit.estimit",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Estimit uses your camera to identify items and estimate their value.",
+        "NSPhotoLibraryUsageDescription": "Estimit lets you select photos of items to estimate their value."
+      },
       "supportsTablet": true
     },
     "android": {
