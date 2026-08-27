@@ -20,9 +20,14 @@ public class EstimitVisionModule: Module {
       throw VisionError.unsupportedOS
     }
 
-    guard let url = URL(string: uri), let image = UIImage(contentsOfFile: url.path), let cgImage = image.cgImage else {
+    guard let url = URL(string: uri), let sourceImage = UIImage(contentsOfFile: url.path) else {
       throw VisionError.invalidImage
     }
+    // Camera files often store portrait orientation as EXIF metadata while their raw pixels
+    // remain landscape. Vision and Core Image need a single upright raster to keep the mask
+    // and React Native preview aligned.
+    let image = normalized(sourceImage)
+    guard let cgImage = image.cgImage else { throw VisionError.invalidImage }
 
     let request = VNGenerateForegroundInstanceMaskRequest()
     let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up)
@@ -39,35 +44,47 @@ public class EstimitVisionModule: Module {
     let original = CIImage(cgImage: cgImage)
     let mask = scaledMask(CIImage(cvPixelBuffer: maskBuffer), to: original.extent)
 
-    let dimmed = original.applyingFilter("CIColorControls", parameters: [
-      kCIInputBrightnessKey: -0.42,
-      kCIInputContrastKey: 0.92,
-      kCIInputSaturationKey: 0.55,
+    // A simple multiply darkens the background without altering its contrast or color balance.
+    let dimmed = original.applyingFilter("CIColorMatrix", parameters: [
+      kCIInputRVectorKey: CIVector(x: 0.32, y: 0, z: 0, w: 0),
+      kCIInputGVectorKey: CIVector(x: 0, y: 0.32, z: 0, w: 0),
+      kCIInputBVectorKey: CIVector(x: 0, y: 0, z: 0.32, w: 0),
+      kCIInputAVectorKey: CIVector(x: 0, y: 0, z: 0, w: 1),
     ])
 
     // Expanding the mask leaves a precise colored edge after the untouched object is composited back.
     let expandedMask = mask.applyingFilter("CIMorphologyMaximum", parameters: ["inputRadius": 7.0])
     let greenGradient = gradient(in: original.extent)
-    let outlined = blend(foreground: greenGradient, over: dimmed, using: expandedMask)
-    let result = blend(foreground: original, over: outlined, using: mask)
+    let basePreview = blend(foreground: original, over: dimmed, using: mask)
+    var previewURLs = [try write(basePreview, extent: original.extent)]
 
-    guard let output = context.createCGImage(result, from: original.extent) else {
-      throw VisionError.renderFailed
+    // Reveal the true object edge from one point around the subject, rather than fading an
+    // entire generic border in at once. Each sector is intersected with the real mask.
+    for step in 1...7 {
+      let sector = angularRevealMask(in: original.extent, progress: CGFloat(step) / 7)
+      let partialOutlineMask = expandedMask.applyingFilter("CIMultiplyCompositing", parameters: [
+        kCIInputBackgroundImageKey: sector,
+      ])
+      let outlined = blend(foreground: greenGradient, over: dimmed, using: partialOutlineMask)
+      let frame = blend(foreground: original, over: outlined, using: mask)
+      previewURLs.append(try write(frame, extent: original.extent))
     }
-
-    let outputURL = FileManager.default.temporaryDirectory
-      .appendingPathComponent("estimit-scan-\(UUID().uuidString).png")
-    guard let png = UIImage(cgImage: output).pngData() else {
-      throw VisionError.renderFailed
-    }
-    try png.write(to: outputURL, options: .atomic)
-    return outputURL.absoluteString
+    return previewURLs.joined(separator: "|")
   }
 
   private func scaledMask(_ mask: CIImage, to extent: CGRect) -> CIImage {
     let scaleX = extent.width / mask.extent.width
     let scaleY = extent.height / mask.extent.height
     return mask.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+  }
+
+  private func normalized(_ image: UIImage) -> UIImage {
+    guard image.imageOrientation != .up else { return image }
+    let format = UIGraphicsImageRendererFormat.default()
+    format.scale = 1
+    return UIGraphicsImageRenderer(size: image.size, format: format).image { _ in
+      image.draw(in: CGRect(origin: .zero, size: image.size))
+    }
   }
 
   private func gradient(in extent: CGRect) -> CIImage {
@@ -78,6 +95,34 @@ public class EstimitVisionModule: Module {
       "inputColor1": CIColor(red: 0.64, green: 0.95, blue: 0.62),
     ])!
     return filter.outputImage!.cropped(to: extent)
+  }
+
+  private func angularRevealMask(in extent: CGRect, progress: CGFloat) -> CIImage {
+    let size = extent.size
+    let format = UIGraphicsImageRendererFormat.default()
+    format.scale = 1
+    let wedge = UIGraphicsImageRenderer(size: size, format: format).image { renderer in
+      UIColor.black.setFill()
+      renderer.cgContext.fill(CGRect(origin: .zero, size: size))
+      UIColor.white.setFill()
+      let center = CGPoint(x: size.width / 2, y: size.height / 2)
+      let radius = hypot(size.width, size.height)
+      let path = UIBezierPath()
+      path.move(to: center)
+      path.addArc(withCenter: center, radius: radius, startAngle: -.pi / 2, endAngle: -.pi / 2 + (.pi * 2 * progress), clockwise: true)
+      path.close()
+      path.fill()
+    }
+    return CIImage(cgImage: wedge.cgImage!).cropped(to: extent)
+  }
+
+  private func write(_ image: CIImage, extent: CGRect) throws -> String {
+    guard let output = context.createCGImage(image, from: extent) else { throw VisionError.renderFailed }
+    let outputURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("estimit-scan-\(UUID().uuidString).png")
+    guard let png = UIImage(cgImage: output).pngData() else { throw VisionError.renderFailed }
+    try png.write(to: outputURL, options: .atomic)
+    return outputURL.absoluteString
   }
 
   private func blend(foreground: CIImage, over background: CIImage, using mask: CIImage) -> CIImage {

@@ -41,6 +41,7 @@ export default function App() {
   const cameraRef = useRef<CameraView>(null);
   const sheetProgress = useRef(new Animated.Value(0)).current;
   const sheetDrag = useRef(new Animated.Value(0)).current;
+  const frozenPreviewOpacity = useRef(new Animated.Value(0)).current;
   const scanPreviewOpacity = useRef(new Animated.Value(0)).current;
   const scanIconProgress = useRef(new Animated.Value(0)).current;
   const historyProgress = useRef(new Animated.Value(0)).current;
@@ -74,9 +75,19 @@ export default function App() {
         stiffness: 245,
         mass: 0.72,
         useNativeDriver: true,
-      }).start();
+      }).start(({ finished }) => {
+        if (!finished) return;
+        // The scan treatment is only an arrival moment; return to the live camera once the sheet lands.
+        Animated.parallel([
+          Animated.timing(frozenPreviewOpacity, { toValue: 0, duration: 220, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+          Animated.timing(scanPreviewOpacity, { toValue: 0, duration: 180, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+        ]).start(() => {
+          setFrozenImageUri(null);
+          setProcessedImageUri(null);
+        });
+      });
     }
-  }, [scanState, sheetProgress]);
+  }, [frozenPreviewOpacity, scanPreviewOpacity, scanState, sheetDrag, sheetProgress]);
 
   const scanImage = async (uri: string) => {
     if (scanStateRef.current !== 'ready') return;
@@ -87,15 +98,21 @@ export default function App() {
     try {
       setFrozenImageUri(uri);
       setProcessedImageUri(null);
+      frozenPreviewOpacity.setValue(1);
       scanPreviewOpacity.setValue(0);
-      const processedUri = await EstimitVision.processImageAsync(uri);
-      setProcessedImageUri(processedUri);
+      const previewSequence = await EstimitVision.processImageAsync(uri);
+      const [basePreview, ...outlineFrames] = previewSequence.split('|');
+      setProcessedImageUri(basePreview);
       Animated.timing(scanPreviewOpacity, {
         toValue: 1,
-        duration: 520,
+        duration: 150,
         easing: Easing.out(Easing.cubic),
         useNativeDriver: true,
       }).start();
+      for (const frame of outlineFrames) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 72));
+        setProcessedImageUri(frame);
+      }
     } catch {
       // Keep the captured image visible if the item is too ambiguous for a foreground mask.
     }
@@ -176,6 +193,7 @@ export default function App() {
     ]).start(() => {
       setFrozenImageUri(null);
       setProcessedImageUri(null);
+      frozenPreviewOpacity.setValue(0);
       scanPreviewOpacity.setValue(0);
       setScanState('ready');
     });
@@ -217,7 +235,7 @@ export default function App() {
       <StatusBar style="light" />
       <View style={StyleSheet.absoluteFill}>
         {permission?.granted ? <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" enableTorch={torchEnabled} /> : <CameraFallback />}
-        {frozenImageUri && <Image source={{ uri: frozenImageUri }} resizeMode="cover" style={StyleSheet.absoluteFill} />}
+        {frozenImageUri && <Animated.Image source={{ uri: frozenImageUri }} resizeMode="cover" style={[StyleSheet.absoluteFill, { opacity: frozenPreviewOpacity }]} />}
         {processedImageUri && <Animated.Image source={{ uri: processedImageUri }} resizeMode="cover" style={[StyleSheet.absoluteFill, { opacity: scanPreviewOpacity }]} />}
         {!frozenImageUri && <View style={styles.cameraShade} />}
         <LinearGradient
