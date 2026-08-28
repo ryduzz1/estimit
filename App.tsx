@@ -8,9 +8,9 @@ import MaskedView from '@react-native-masked-view/masked-view';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Animated, Easing, Image, Linking, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import { Alert, Animated, Easing, Image, Linking, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import EstimitVision from './modules/estim-vision/src/EstimitVisionModule';
-import { refineIdentity, requestValuation, ScanOutcome, ValuationApiError } from './src/api';
+import { refineIdentity, requestValuation, ScanOutcome, submitScanFeedback, ValuationApiError } from './src/api';
 import { formatEstimate, formatMoney, Identification, MarketEvidence, ResearchResult, ValuationResult } from './src/valuation';
 
 type ScanState = 'ready' | 'scanning' | 'result';
@@ -28,6 +28,7 @@ const itemFormOptions: Array<{ value: Identification['itemForm']; label: string 
 const conditionOptions: Identification['condition'][] = ['poor', 'fair', 'good', 'excellent', 'unknown'];
 const HISTORY_FILE_NAME = 'estimit-history-v1.json';
 const HISTORY_LIMIT = 100;
+const evaluationMode = process.env.EXPO_PUBLIC_ESTIMIT_EVALUATION_MODE !== 'false';
 
 const gemMark = require('./assets/estimit-gem-mark.png');
 
@@ -99,6 +100,8 @@ export default function App() {
   const [editingIdentity, setEditingIdentity] = useState(false);
   const [refiningIdentity, setRefiningIdentity] = useState(false);
   const [identityDraft, setIdentityDraft] = useState<IdentityDraft | null>(null);
+  const [priceFeedback, setPriceFeedback] = useState<'low' | 'fair' | 'high' | null>(null);
+  const [knownValueSubmitted, setKnownValueSubmitted] = useState(false);
   const { width } = useWindowDimensions();
   const cameraRef = useRef<CameraView>(null);
   const sheetProgress = useRef(new Animated.Value(0)).current;
@@ -253,6 +256,8 @@ export default function App() {
       setOutcome(remote.value);
       setIdentityConfirmed(false);
       setEditingIdentity(false);
+      setPriceFeedback(null);
+      setKnownValueSubmitted(false);
       if (remote.value.kind === 'followup') {
         const identity = remote.value.detail.identification;
         followupHintsRef.current = `Previous scan candidate: ${identity.brand} ${identity.model} ${identity.variant}. Missing details: ${identity.missingDetails.join(', ')}.`;
@@ -361,6 +366,8 @@ export default function App() {
       setIdentityConfirmed(false);
       setEditingIdentity(false);
       setIdentityDraft(null);
+      setPriceFeedback(null);
+      setKnownValueSubmitted(false);
       scanStateRef.current = 'ready';
       setScanState('ready');
     });
@@ -373,6 +380,7 @@ export default function App() {
   const confirmIdentity = async () => {
     setIdentityConfirmed(true);
     setEditingIdentity(false);
+    if (identifiedResult) void submitScanFeedback({ scanId: identifiedResult.id, identityVerdict: 'confirmed' }).catch(() => undefined);
     await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   };
 
@@ -403,6 +411,7 @@ export default function App() {
     }
     setRefiningIdentity(true);
     try {
+      const originalScanId = identifiedResult.id;
       const quantity = Math.max(1, Math.min(100, Number.parseInt(identityDraft.quantity, 10) || 1));
       const revised = await refineIdentity({
         ...identifiedResult.identification,
@@ -419,6 +428,10 @@ export default function App() {
       setOutcome(revised);
       setIdentityConfirmed(true);
       setEditingIdentity(false);
+      setPriceFeedback(null);
+      setKnownValueSubmitted(false);
+      void submitScanFeedback({ scanId: originalScanId, identityVerdict: 'corrected' }).catch(() => undefined);
+      void submitScanFeedback({ scanId: revised.result.id, identityVerdict: 'confirmed' }).catch(() => undefined);
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (error) {
       Alert.alert('Couldn’t update the match', error instanceof Error ? error.message : 'Please try again.');
@@ -435,6 +448,44 @@ export default function App() {
     } catch {
       Alert.alert('Couldn’t open this listing', 'The marketplace link may be temporarily unavailable.');
     }
+  };
+
+  const submitPriceVerdict = async (verdict: 'low' | 'fair' | 'high') => {
+    if (outcome?.kind !== 'research' || !outcome.result.estimate) return;
+    setPriceFeedback(verdict);
+    await Haptics.selectionAsync();
+    void submitScanFeedback({ scanId: outcome.result.id, priceVerdict: verdict }).catch(() => undefined);
+  };
+
+  const promptForKnownValue = () => {
+    if (!evaluationMode || Platform.OS !== 'ios' || outcome?.kind !== 'research' || !outcome.result.estimate) return;
+    const estimate = outcome.result.estimate;
+    const scanId = outcome.result.id;
+    Alert.prompt(
+      'Add a known value',
+      'Enter a trusted completed-sale or market value. Estimit stores only the resulting error percentage, not this price.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Record',
+          onPress: (rawValue?: string) => {
+            const reference = Number((rawValue ?? '').replace(/[$,\s]/g, ''));
+            if (!Number.isFinite(reference) || reference <= 0) {
+              Alert.alert('Enter a valid price', 'Use a positive dollar amount.');
+              return;
+            }
+            const relativeErrorRatio = Math.max(-10, Math.min(10, (estimate.likely - reference) / reference));
+            const rangeHit = reference >= estimate.low && reference <= estimate.high;
+            setKnownValueSubmitted(true);
+            void submitScanFeedback({ scanId, relativeErrorRatio, rangeHit }).catch(() => undefined);
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          },
+        },
+      ],
+      'plain-text',
+      '',
+      'decimal-pad',
+    );
   };
 
   const sheetPanResponder = useRef(PanResponder.create({
@@ -559,7 +610,7 @@ export default function App() {
           />
         )}
         {result && <ValuationContent result={result} identityConfirmed={identityConfirmed} onOpenEvidence={openEvidence} />}
-        {outcome?.kind === 'research' && <ResearchContent result={outcome.result} onOpenEvidence={openEvidence} />}
+        {outcome?.kind === 'research' && <ResearchContent result={outcome.result} priceFeedback={priceFeedback} knownValueSubmitted={knownValueSubmitted} onKnownValue={promptForKnownValue} onPriceFeedback={submitPriceVerdict} onOpenEvidence={openEvidence} />}
         {outcome?.kind === 'followup' && <FollowupContent outcome={outcome} onContinue={() => closeSheet(true)} />}
         {outcome?.kind === 'error' && <ErrorContent onRetry={() => closeSheet(true)} />}
       </Animated.View>
@@ -768,7 +819,21 @@ function ValuationContent({ result, identityConfirmed, onOpenEvidence }: { resul
   );
 }
 
-function ResearchContent({ result, onOpenEvidence }: { result: ResearchResult; onOpenEvidence: (evidence: MarketEvidence) => void }) {
+function ResearchContent({
+  result,
+  priceFeedback,
+  knownValueSubmitted,
+  onKnownValue,
+  onPriceFeedback,
+  onOpenEvidence,
+}: {
+  result: ResearchResult;
+  priceFeedback: 'low' | 'fair' | 'high' | null;
+  knownValueSubmitted: boolean;
+  onKnownValue: () => void;
+  onPriceFeedback: (verdict: 'low' | 'fair' | 'high') => void;
+  onOpenEvidence: (evidence: MarketEvidence) => void;
+}) {
   const estimate = result.estimate
     ? formatMoney(result.estimate.likely, result.estimate.currency)
     : '—';
@@ -783,6 +848,25 @@ function ResearchContent({ result, onOpenEvidence }: { result: ResearchResult; o
           <View style={styles.preliminaryDot} />
           <Text style={styles.preliminaryLabel}>{result.estimate ? `${result.estimate.sampleSize} ACTIVE LISTINGS · ${result.estimate.confidence}% CONFIDENCE` : 'NOT ENOUGH CLOSE MATCHES'}</Text>
         </View>
+        {result.estimate && (
+          <>
+            <View style={styles.estimateFeedback}>
+              <Text style={styles.estimateFeedbackLabel}>ESTIMATE</Text>
+              {(['low', 'fair', 'high'] as const).map((verdict) => (
+                <Pressable key={verdict} accessibilityRole="button" accessibilityState={{ selected: priceFeedback === verdict }} onPress={() => onPriceFeedback(verdict)} hitSlop={8}>
+                  <Text style={[styles.estimateFeedbackOption, priceFeedback === verdict && styles.estimateFeedbackOptionSelected]}>
+                    {verdict === 'low' ? 'TOO LOW' : verdict === 'fair' ? 'FAIR' : 'TOO HIGH'}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            {evaluationMode && Platform.OS === 'ios' && (
+              <Pressable onPress={onKnownValue} hitSlop={8} style={styles.knownValueButton}>
+                <Text style={[styles.knownValueText, knownValueSubmitted && styles.knownValueTextSubmitted]}>{knownValueSubmitted ? 'KNOWN VALUE RECORDED' : '+ ADD KNOWN VALUE'}</Text>
+              </Pressable>
+            )}
+          </>
+        )}
       </View>
       <View style={styles.hairline} />
       <View style={styles.sectionHeader}>
@@ -955,6 +1039,13 @@ const styles = StyleSheet.create({
   marketRange: { color: '#B8B8B8', marginTop: 2, fontSize: 11, fontWeight: '700', letterSpacing: 0.2 },
   preliminaryDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: '#E4CF86' },
   preliminaryLabel: { color: '#A7A7A7', fontSize: 8, fontWeight: '800', letterSpacing: 1 },
+  estimateFeedback: { flexDirection: 'row', alignItems: 'center', gap: 14, marginTop: 12 },
+  estimateFeedbackLabel: { color: '#666666', fontSize: 7.5, fontWeight: '900', letterSpacing: 1 },
+  estimateFeedbackOption: { color: '#8A8A8A', fontSize: 8, fontWeight: '900', letterSpacing: 0.75 },
+  estimateFeedbackOptionSelected: { color: '#9DE7A2' },
+  knownValueButton: { alignSelf: 'flex-start', marginTop: 9, paddingVertical: 2 },
+  knownValueText: { color: '#686868', fontSize: 7.5, fontWeight: '900', letterSpacing: 0.8 },
+  knownValueTextSubmitted: { color: '#79B981' },
   hairline: { height: StyleSheet.hairlineWidth, backgroundColor: '#353535', marginHorizontal: 20, marginTop: 24 },
   sectionHeader: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', marginHorizontal: 20, marginTop: 22 },
   sectionTitle: { color: '#FFFFFF', fontSize: 19, fontWeight: '800', letterSpacing: -0.5 },

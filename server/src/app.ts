@@ -2,8 +2,9 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyRequest } from 'fastify';
+import { z } from 'zod';
 import { config } from './config.js';
-import { authenticateInstallation, createInstallation, databaseIsReady, getValuation, saveValuation } from './database.js';
+import { authenticateInstallation, createInstallation, databaseIsReady, getEvaluationSummary, getValuation, recordScanEvaluation, recordScanFeedback, saveValuation } from './database.js';
 import { identificationSchema, type Identification, type ResearchResult, type ValuationResult } from './domain.js';
 import { findEvidence } from './evidence.js';
 import { hasUsableSearchIdentity, identifyItem, targetedPhotoRequest } from './identify.js';
@@ -11,6 +12,14 @@ import { calculateActiveMarketEstimate, calculateValuation } from './pricing.js'
 
 const allowedImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
 const installationIds = new WeakMap<FastifyRequest, string>();
+const feedbackSchema = z.object({
+  scanId: z.uuid(),
+  identityVerdict: z.enum(['confirmed', 'corrected', 'wrong']).optional(),
+  priceVerdict: z.enum(['low', 'fair', 'high']).optional(),
+  relativeErrorRatio: z.number().min(-10).max(10).optional(),
+  rangeHit: z.boolean().optional(),
+}).refine((value) => (value.relativeErrorRatio === undefined) === (value.rangeHit === undefined))
+  .refine((value) => value.identityVerdict !== undefined || value.priceVerdict !== undefined || value.relativeErrorRatio !== undefined);
 
 function tokenDigest(token: string) {
   return createHash('sha256').update(token).digest('hex');
@@ -158,6 +167,9 @@ export function buildApp() {
       });
     }
     const result = await evaluateIdentity(id, identity);
+    await recordScanEvaluation(result, installationId).catch((error) => {
+      request.log.warn({ err: error, scanId: result.id }, 'Could not record privacy-safe evaluation metrics');
+    });
     if (!('status' in result)) await saveValuation(imageSha256, identity, result, installationId);
     return reply.code('status' in result ? 200 : 201).send(result);
   });
@@ -176,7 +188,35 @@ export function buildApp() {
     };
     if (!hasUsableSearchIdentity(identity)) return reply.code(400).send({ error: 'identity_not_searchable' });
     const result = await evaluateIdentity(randomUUID(), identity);
+    await recordScanEvaluation(result, installationIds.get(request), true).catch((error) => {
+      request.log.warn({ err: error, scanId: result.id }, 'Could not record refined evaluation metrics');
+    });
     return reply.code(200).send(result);
+  });
+
+  app.post<{ Body: unknown }>('/v1/feedback', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const installationId = installationIds.get(request);
+    if (!installationId) return reply.code(403).send({ error: 'installation_required' });
+    const parsed = feedbackSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid_feedback' });
+    const feedback = {
+      ...(parsed.data.identityVerdict !== undefined ? { identityVerdict: parsed.data.identityVerdict } : {}),
+      ...(parsed.data.priceVerdict !== undefined ? { priceVerdict: parsed.data.priceVerdict } : {}),
+      ...(parsed.data.relativeErrorRatio !== undefined ? { relativeErrorRatio: parsed.data.relativeErrorRatio } : {}),
+      ...(parsed.data.rangeHit !== undefined ? { rangeHit: parsed.data.rangeHit } : {}),
+    };
+    const recorded = await recordScanFeedback(parsed.data.scanId, installationId, feedback);
+    if (!recorded) return reply.code(404).send({ error: 'scan_not_found' });
+    return reply.code(202).send({ recorded: true });
+  });
+
+  app.get('/v1/evaluation/summary', async (request, reply) => {
+    if (!config.ESTIMIT_API_TOKEN || !validToken(request.headers.authorization)) {
+      return reply.code(403).send({ error: 'admin_token_required' });
+    }
+    return getEvaluationSummary();
   });
 
   app.get<{ Params: { id: string } }>('/v1/valuations/:id', async (request, reply) => {

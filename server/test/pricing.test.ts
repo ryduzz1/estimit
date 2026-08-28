@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Identification, MarketEvidence } from '../src/domain.js';
-import { calculateActiveMarketEstimate, calculateValuation } from '../src/pricing.js';
+import { calculateActiveMarketEstimate, calculateValuation, marketQualityPolicy } from '../src/pricing.js';
 
 const identity: Identification = {
   category: 'smartphone', brand: 'Apple', model: 'iPhone 13 Pro', variant: '256GB', condition: 'good',
@@ -48,5 +48,30 @@ test('withholds an asking-price estimate when fewer than three close listings ex
     { id: 'a', source: 'eBay', title: 'A', detail: '', price: 100, kind: 'active', url: 'https://example.com/a', matchScore: 95, observedAt },
     { id: 'b', source: 'eBay', title: 'B', detail: '', price: 120, kind: 'active', url: 'https://example.com/b', matchScore: 94, observedAt },
   ];
+  assert.equal(calculateActiveMarketEstimate(identity, evidence), null);
+});
+
+test('requires more evidence and caps confidence for generic or non-standard items', () => {
+  const generic = { ...identity, brand: 'unknown', model: 'wired gaming mouse' };
+  assert.deepEqual(marketQualityPolicy(generic), {
+    minimumSampleSize: 5,
+    minimumAverageMatch: 0.78,
+    maximumRangeSpread: 0.55,
+    maximumConfidence: 65,
+  });
+  const observedAt = new Date().toISOString();
+  const evidence: MarketEvidence[] = [100, 105, 110, 115].map((price, index) => ({
+    id: String(index), source: 'eBay', title: 'Mouse', detail: '', price, kind: 'active' as const,
+    url: `https://example.com/${index}`, matchScore: 95, observedAt,
+  }));
+  assert.equal(calculateActiveMarketEstimate(generic, evidence), null);
+});
+
+test('declines unstable markets with an excessively wide central range', () => {
+  const observedAt = new Date().toISOString();
+  const evidence: MarketEvidence[] = [10, 20, 100, 200, 220].map((price, index) => ({
+    id: String(index), source: 'eBay', title: 'Item', detail: '', price, kind: 'active' as const,
+    url: `https://example.com/wide-${index}`, matchScore: 95, observedAt,
+  }));
   assert.equal(calculateActiveMarketEstimate(identity, evidence), null);
 });

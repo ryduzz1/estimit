@@ -124,3 +124,32 @@ export async function refineIdentity(identification: Identification): Promise<Ex
     clearTimeout(timeout);
   }
 }
+
+export type ScanFeedback = {
+  scanId: string;
+  identityVerdict?: 'confirmed' | 'corrected' | 'wrong';
+  priceVerdict?: 'low' | 'fair' | 'high';
+  relativeErrorRatio?: number;
+  rangeHit?: boolean;
+};
+
+export async function submitScanFeedback(feedback: ScanFeedback) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const send = (token: string) => expoFetch(`${API_URL}/v1/feedback`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(feedback),
+      signal: controller.signal,
+    });
+    let response = await send(await getInstallationToken());
+    if (response.status === 401) {
+      await clearInstallationToken();
+      response = await send(await registerInstallation());
+    }
+    if (!response.ok) throw new ValuationApiError('Feedback could not be recorded.', response.status);
+  } finally {
+    clearTimeout(timeout);
+  }
+}

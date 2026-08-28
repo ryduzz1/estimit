@@ -10,6 +10,13 @@ export type ActiveMarketEstimate = {
   sampleSize: number;
 };
 
+export type MarketQualityPolicy = {
+  minimumSampleSize: number;
+  minimumAverageMatch: number;
+  maximumRangeSpread: number;
+  maximumConfidence: number;
+};
+
 function percentile(sorted: number[], fraction: number) {
   if (sorted.length === 0) throw new Error('Cannot calculate a percentile without evidence.');
   const index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * fraction)));
@@ -37,9 +44,24 @@ function weightedPercentile(entries: Array<{ value: number; weight: number }>, f
   return ordered.at(-1)!.value;
 }
 
+export function marketQualityPolicy(identity: Identification): MarketQualityPolicy {
+  const category = identity.category.toLowerCase();
+  const unknownBrand = ['unknown', 'unidentified', 'n/a', 'none'].includes(identity.brand.trim().toLowerCase());
+  const nonStandardItem = identity.itemForm !== 'single_item';
+  const conditionSensitive = /card|collectible|shoe|sneaker|clothing|apparel|vintage|furniture/.test(category);
+  if (unknownBrand || nonStandardItem) {
+    return { minimumSampleSize: 5, minimumAverageMatch: 0.78, maximumRangeSpread: 0.55, maximumConfidence: 65 };
+  }
+  if (conditionSensitive) {
+    return { minimumSampleSize: 5, minimumAverageMatch: 0.8, maximumRangeSpread: 0.5, maximumConfidence: 70 };
+  }
+  return { minimumSampleSize: 3, minimumAverageMatch: 0.75, maximumRangeSpread: 0.65, maximumConfidence: 80 };
+}
+
 export function calculateActiveMarketEstimate(identity: Identification, evidence: MarketEvidence[]): ActiveMarketEstimate | null {
+  const policy = marketQualityPolicy(identity);
   const eligible = evidence.filter((entry) => entry.kind === 'active' && entry.matchScore >= 70 && typeof entry.price === 'number');
-  if (eligible.length < 3) return null;
+  if (eligible.length < policy.minimumSampleSize) return null;
 
   const weightedPrices = eligible.map((entry) => ({
     value: entry.price! + (entry.shipping ?? 0),
@@ -54,11 +76,12 @@ export function calculateActiveMarketEstimate(identity: Identification, evidence
   const high = marketRound(Math.max(rawHigh, rawLikely));
 
   const averageMatch = eligible.reduce((sum, entry) => sum + entry.matchScore, 0) / eligible.length / 100;
-  const sampleQuality = Math.min(1, eligible.length / 8);
   const spread = (high - low) / Math.max(1, likely);
+  if (averageMatch < policy.minimumAverageMatch || spread > policy.maximumRangeSpread) return null;
+  const sampleQuality = Math.min(1, eligible.length / 8);
   const stability = 1 - Math.min(1, spread);
   // Active asks are useful market context but less certain than completed sales.
-  const confidence = Math.min(80, Math.round(100 * (
+  const confidence = Math.min(policy.maximumConfidence, Math.round(100 * (
     identity.identificationConfidence * 0.35
     + averageMatch * 0.3
     + sampleQuality * 0.2

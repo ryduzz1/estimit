@@ -7,19 +7,22 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_ESTIMIT_API_URL": "https://server.tailc264d2.ts.net:8443"
+        "EXPO_PUBLIC_ESTIMIT_API_URL": "https://server.tailc264d2.ts.net:8443",
+        "EXPO_PUBLIC_ESTIMIT_EVALUATION_MODE": "true"
       }
     },
     "preview": {
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_ESTIMIT_API_URL": "https://server.tailc264d2.ts.net:8443"
+        "EXPO_PUBLIC_ESTIMIT_API_URL": "https://server.tailc264d2.ts.net:8443",
+        "EXPO_PUBLIC_ESTIMIT_EVALUATION_MODE": "true"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_ESTIMIT_API_URL": "https://server.tailc264d2.ts.net:8443"
+        "EXPO_PUBLIC_ESTIMIT_API_URL": "https://server.tailc264d2.ts.net:8443",
+        "EXPO_PUBLIC_ESTIMIT_EVALUATION_MODE": "false"
       }
     }
   },

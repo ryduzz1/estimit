@@ -16,6 +16,8 @@ The app handles four server outcomes: an evidence-backed valuation, identified-i
 
 Release profiles are defined in `eas.json`. Before a broad App Store release, replace the production endpoint with a custom API domain and add Apple App Attest to the installation-registration flow.
 
+Preview builds include a compact calibration control under marketplace estimates. Testers can mark an estimate low, fair, or high and optionally compare it with a trusted known value. Production builds keep the simple qualitative feedback but hide known-value entry.
+
 ## iOS development with Xcode
 
 This is an Expo + React Native app. Xcode runs the native iOS app, while Expo provides the JavaScript development server and configuration.

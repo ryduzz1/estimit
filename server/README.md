@@ -66,3 +66,20 @@ docker compose up -d --build
 Never commit `.env`, paste secrets into source files, or put provider secrets in the Expo app. OpenAI identification is enabled by `OPENAI_API_KEY`. eBay Browse requires `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET`. PriceCharting requires a paid `PRICECHARTING_TOKEN`.
 
 Marketplace adapters remain preview-only until their implementation and credentials are both present. Active listings must stay labeled as context; sold data may support valuation only when its license explicitly permits this use.
+
+## Evaluation and calibration
+
+Completed scans record privacy-safe quality metrics for calibration: category, item form, identification confidence, evidence count, mean match score, range spread, estimate confidence, and whether an estimate was shown. Feedback records identity confirmation/correction and whether the estimate felt low, fair, or high.
+
+Evaluation builds also let a tester enter a trusted reference value. The phone calculates signed percentage error and whether the displayed range contained that value. Only those two derived measurements are sent. The reference price itself is not retained.
+
+This telemetry intentionally does **not** store photos, brands, model names, listing titles, listing URLs, eBay prices, or estimated dollar values. That keeps the current eBay non-persistence exemption accurate.
+
+An administrator can retrieve aggregate results with:
+
+```sh
+curl https://server.tailc264d2.ts.net:8443/v1/evaluation/summary \
+  -H "Authorization: Bearer YOUR_ESTIMIT_ADMIN_TOKEN"
+```
+
+The report includes estimate coverage, identity-confirm/correction counts, qualitative price feedback, mean absolute percentage error, range coverage, and category-level breakdowns. Treat metrics as directional until there are at least 30 labeled examples in a category. Development and preview builds enable known-value entry; production builds hide that testing-only control.
