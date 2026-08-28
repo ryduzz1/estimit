@@ -53,7 +53,15 @@ export type ResearchResult = {
   id: string;
   item: { name: string; details: string };
   identification: Identification;
-  estimate: { low: number; high: number; currency: 'USD'; confidence: number; basis: 'visual' } | null;
+  estimate: {
+    low: number;
+    likely: number;
+    high: number;
+    currency: 'USD';
+    confidence: number;
+    basis: 'active_listings';
+    sampleSize: number;
+  } | null;
   evidence: MarketEvidence[];
   disclosure: string;
 };

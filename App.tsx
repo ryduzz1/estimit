@@ -694,17 +694,18 @@ function ValuationContent({ result, identityConfirmed, onOpenEvidence }: { resul
 
 function ResearchContent({ result, onOpenEvidence }: { result: ResearchResult; onOpenEvidence: (evidence: MarketEvidence) => void }) {
   const estimate = result.estimate
-    ? `${formatMoney(result.estimate.low, result.estimate.currency)}–${formatMoney(result.estimate.high, result.estimate.currency)}`
+    ? formatMoney(result.estimate.likely, result.estimate.currency)
     : '—';
   const hasLiveListings = result.evidence.some((listing) => typeof listing.price === 'number');
   return (
     <>
       <View style={styles.valuation}>
-        <Text style={styles.kicker}>ESTIMATED RESALE VALUE</Text>
+        <Text style={styles.kicker}>ESTIMATED ASKING PRICE</Text>
         <GradientValue value={estimate} />
+        {result.estimate && <Text style={styles.marketRange}>MARKET RANGE {formatMoney(result.estimate.low, result.estimate.currency)}–{formatMoney(result.estimate.high, result.estimate.currency)}</Text>}
         <View style={styles.preliminaryRow}>
           <View style={styles.preliminaryDot} />
-          <Text style={styles.preliminaryLabel}>{result.estimate ? 'PRELIMINARY RANGE · CLOSE LISTINGS FOUND' : 'NOT ENOUGH CLOSE MATCHES'}</Text>
+          <Text style={styles.preliminaryLabel}>{result.estimate ? `${result.estimate.sampleSize} ACTIVE LISTINGS · ${result.estimate.confidence}% CONFIDENCE` : 'NOT ENOUGH CLOSE MATCHES'}</Text>
         </View>
       </View>
       <View style={styles.hairline} />
@@ -872,6 +873,7 @@ const styles = StyleSheet.create({
   confidenceLabel: { color: '#A1A1A1', fontSize: 14, fontWeight: '600' },
   confidenceValue: { fontSize: 14, fontWeight: '800' },
   preliminaryRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 5 },
+  marketRange: { color: '#B8B8B8', marginTop: 2, fontSize: 11, fontWeight: '700', letterSpacing: 0.2 },
   preliminaryDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: '#E4CF86' },
   preliminaryLabel: { color: '#A7A7A7', fontSize: 8, fontWeight: '800', letterSpacing: 1 },
   hairline: { height: StyleSheet.hairlineWidth, backgroundColor: '#353535', marginHorizontal: 20, marginTop: 24 },

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Identification, MarketEvidence } from '../src/domain.js';
-import { calculateValuation } from '../src/pricing.js';
+import { calculateActiveMarketEstimate, calculateValuation } from '../src/pricing.js';
 
 const identity: Identification = {
   category: 'smartphone', brand: 'Apple', model: 'iPhone 13 Pro', variant: '256GB', condition: 'good',
@@ -25,4 +25,28 @@ test('refuses to calculate a valuation from asking prices alone', () => {
     { id: 'active', source: 'Test', title: 'Active', detail: '', price: 900, kind: 'active', url: 'https://example.com/active', matchScore: 95, observedAt: new Date().toISOString() },
   ];
   assert.throws(() => calculateValuation('00000000-0000-0000-0000-000000000002', identity, evidence), /No sufficiently similar market evidence/);
+});
+
+test('calculates a deterministic asking-price center and range from close active listings', () => {
+  const observedAt = new Date().toISOString();
+  const evidence: MarketEvidence[] = [
+    { id: 'a', source: 'eBay', title: 'A', detail: '', price: 90, shipping: 10, kind: 'active', url: 'https://example.com/a', matchScore: 96, observedAt },
+    { id: 'b', source: 'eBay', title: 'B', detail: '', price: 120, kind: 'active', url: 'https://example.com/b', matchScore: 94, observedAt },
+    { id: 'c', source: 'eBay', title: 'C', detail: '', price: 140, kind: 'active', url: 'https://example.com/c', matchScore: 92, observedAt },
+    { id: 'd', source: 'eBay', title: 'D', detail: '', price: 500, kind: 'active', url: 'https://example.com/d', matchScore: 72, observedAt },
+  ];
+  const estimate = calculateActiveMarketEstimate(identity, evidence);
+  assert.deepEqual({ low: estimate?.low, likely: estimate?.likely, high: estimate?.high }, { low: 100, likely: 120, high: 140 });
+  assert.equal(estimate?.sampleSize, 4);
+  assert.equal(estimate?.basis, 'active_listings');
+  assert.ok((estimate?.confidence ?? 100) <= 80);
+});
+
+test('withholds an asking-price estimate when fewer than three close listings exist', () => {
+  const observedAt = new Date().toISOString();
+  const evidence: MarketEvidence[] = [
+    { id: 'a', source: 'eBay', title: 'A', detail: '', price: 100, kind: 'active', url: 'https://example.com/a', matchScore: 95, observedAt },
+    { id: 'b', source: 'eBay', title: 'B', detail: '', price: 120, kind: 'active', url: 'https://example.com/b', matchScore: 94, observedAt },
+  ];
+  assert.equal(calculateActiveMarketEstimate(identity, evidence), null);
 });

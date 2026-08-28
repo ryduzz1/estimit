@@ -7,7 +7,7 @@ import { authenticateInstallation, createInstallation, databaseIsReady, getValua
 import { identificationSchema, type Identification, type ResearchResult, type ValuationResult } from './domain.js';
 import { findEvidence } from './evidence.js';
 import { hasUsableSearchIdentity, identifyItem, targetedPhotoRequest } from './identify.js';
-import { calculateValuation } from './pricing.js';
+import { calculateActiveMarketEstimate, calculateValuation } from './pricing.js';
 
 const allowedImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
 const installationIds = new WeakMap<FastifyRequest, string>();
@@ -55,26 +55,16 @@ async function evaluateIdentity(id: string, identity: Identification): Promise<R
   const evidence = await findEvidence(identity);
   const soldEvidence = evidence.filter((entry) => entry.kind === 'sold' && typeof entry.price === 'number');
   if (soldEvidence.length > 0) return calculateValuation(id, identity, evidence);
-  const strongActiveEvidence = evidence.filter((entry) => entry.kind === 'active' && typeof entry.price === 'number' && entry.matchScore >= 70);
-  const hasVisualEstimate = identity.visualEstimateLow !== null
-    && identity.visualEstimateHigh !== null
-    && strongActiveEvidence.length >= 3;
-  const evidenceConfidence = Math.min(1, strongActiveEvidence.length / 6);
+  const activeEstimate = calculateActiveMarketEstimate(identity, evidence);
   return {
     status: 'research_only',
     id,
     item: itemFromIdentity(identity),
     identification: identity,
-    estimate: hasVisualEstimate ? {
-      low: Math.round(Math.min(identity.visualEstimateLow!, identity.visualEstimateHigh!)),
-      high: Math.round(Math.max(identity.visualEstimateLow!, identity.visualEstimateHigh!)),
-      currency: 'USD',
-      confidence: Math.min(55, Math.round(identity.identificationConfidence * 45 + evidenceConfidence * 10)),
-      basis: 'visual',
-    } : null,
+    estimate: activeEstimate,
     evidence,
-    disclosure: hasVisualEstimate
-      ? `Preliminary visual range with ${strongActiveEvidence.length} closely matched active listings for context. Verified sold-price data is not connected yet.`
+    disclosure: activeEstimate
+      ? `Calculated from ${activeEstimate.sampleSize} closely matched active listings, including shipping when available. This reflects asking prices, not completed sales.`
       : 'No estimate is shown because Estimit did not find enough closely matched listings. Broad or questionable results were removed.',
   };
 }

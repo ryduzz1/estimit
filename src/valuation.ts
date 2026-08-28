@@ -62,10 +62,12 @@ export type ResearchResult = {
   identification: Identification;
   estimate: {
     low: number;
+    likely: number;
     high: number;
     currency: 'USD';
     confidence: number;
-    basis: 'visual';
+    basis: 'active_listings';
+    sampleSize: number;
   } | null;
   evidence: MarketEvidence[];
   disclosure: string;
