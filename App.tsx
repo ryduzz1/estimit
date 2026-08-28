@@ -28,7 +28,7 @@ const itemFormOptions: Array<{ value: Identification['itemForm']; label: string 
 const conditionOptions: Identification['condition'][] = ['poor', 'fair', 'good', 'excellent', 'unknown'];
 const HISTORY_FILE_NAME = 'estimit-history-v1.json';
 const HISTORY_LIMIT = 100;
-const evaluationMode = process.env.EXPO_PUBLIC_ESTIMIT_EVALUATION_MODE !== 'false';
+const evaluationMode = process.env.EXPO_PUBLIC_ESTIMIT_EVALUATION_MODE === 'true';
 
 const gemMark = require('./assets/estimit-gem-mark.png');
 
@@ -69,7 +69,7 @@ async function persistHistory(entries: HistoryEntry[]) {
 function historyEntryFor(result: ValuationResult | ResearchResult): HistoryEntry {
   const isResearch = 'status' in result;
   const value = isResearch
-    ? result.estimate ? formatMoney(result.estimate.likely, result.estimate.currency) : 'No range'
+    ? result.estimate ? formatMoney(result.estimate.likely, result.estimate.currency) : 'N/A'
     : formatEstimate(result);
   const count = result.evidence.length;
   return {
@@ -540,9 +540,11 @@ export default function App() {
 
       <SafeAreaView style={styles.safeArea} {...historyPanResponder.panHandlers}>
         {scanState === 'ready' && (
-          <Pressable accessibilityRole="button" accessibilityLabel="Open scan history" onPress={() => setHistoryVisible(true)} hitSlop={12} style={({ pressed }) => [styles.historyShortcut, pressed && styles.historyShortcutPressed]}>
-            <Text style={styles.historyShortcutText}>History ›</Text>
-          </Pressable>
+          <View style={styles.cameraTopBar}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Open scan history" onPress={() => setHistoryVisible(true)} hitSlop={12} style={({ pressed }) => [styles.historyShortcut, pressed && styles.historyShortcutPressed]}>
+              <Text style={styles.historyShortcutText}>History ›</Text>
+            </Pressable>
+          </View>
         )}
         <View style={styles.captureDock}>
           {scanState === 'scanning' && (
@@ -581,8 +583,8 @@ export default function App() {
           <View style={styles.sheetHandle} />
           <View style={styles.sheetHeader}>
             <View style={styles.sheetHeaderCopy}>
-              <Text style={styles.kicker}>{outcome?.kind === 'valuation' ? 'EVALUATION' : outcome?.kind === 'research' ? 'ITEM IDENTIFIED' : outcome?.kind === 'followup' ? 'DETAIL PHOTO' : 'SCAN INTERRUPTED'}</Text>
-              <Text style={styles.itemName}>{outcome?.kind === 'valuation' || outcome?.kind === 'research' ? outcome.result.item.name : outcome?.kind === 'followup' ? 'Add a closer photo' : 'Couldn’t send scan'}</Text>
+              {outcome?.kind !== 'research' && <Text style={styles.kicker}>{outcome?.kind === 'valuation' ? 'EVALUATION' : outcome?.kind === 'followup' ? 'DETAIL PHOTO' : 'SCAN INTERRUPTED'}</Text>}
+              <Text style={[styles.itemName, outcome?.kind === 'research' && styles.itemNameResult]}>{outcome?.kind === 'valuation' || outcome?.kind === 'research' ? outcome.result.item.name : outcome?.kind === 'followup' ? 'Add a closer photo' : 'Couldn’t send scan'}</Text>
               <Text style={styles.itemDetails} numberOfLines={2}>
                 {outcome?.kind === 'valuation' || outcome?.kind === 'research'
                   ? outcome.result.item.details
@@ -725,18 +727,18 @@ function IdentityCheck({
     );
   }
 
-  const formLabel = identity.itemForm === 'single_item' ? 'single item' : identity.itemForm.replace('_', ' ');
+  const itemCount = identity.quantity > 1 ? `${identity.quantity} items` : null;
   return (
     <View style={[styles.identityCheck, confirmed && styles.identityCheckConfirmed]}>
       <View style={styles.identityCheckCopy}>
         <View style={styles.identityCheckLabelRow}>
-          <Ionicons name={confirmed ? 'checkmark-circle' : 'scan-outline'} color={confirmed ? '#8CE798' : '#C4C4C4'} size={14} />
-          <Text style={[styles.identityCheckLabel, confirmed && styles.identityCheckLabelConfirmed]}>{confirmed ? 'MATCH CONFIRMED' : 'CHECK THE MATCH'}</Text>
+          <Ionicons name={confirmed ? 'checkmark-circle' : 'help-circle-outline'} color={confirmed ? '#8CE798' : '#C4C4C4'} size={15} />
+          <Text style={[styles.identityCheckLabel, confirmed && styles.identityCheckLabelConfirmed]}>{confirmed ? 'Item confirmed' : 'Is this the right item?'}</Text>
         </View>
-        <Text numberOfLines={1} style={styles.identityCheckDetail}>{formLabel}{identity.quantity > 1 ? ` · ${identity.quantity} items` : ''} · {Math.round(identity.identificationConfidence * 100)}% visual confidence</Text>
+        {itemCount && <Text numberOfLines={1} style={styles.identityCheckDetail}>{itemCount}</Text>}
       </View>
-      {!confirmed && <Pressable onPress={onConfirm} style={styles.identityConfirmButton}><Text style={styles.identityConfirmText}>YES</Text></Pressable>}
-      <Pressable onPress={onEdit} style={styles.identityEditButton}><Text style={styles.identityEditText}>EDIT</Text></Pressable>
+      {!confirmed && <Pressable onPress={onConfirm} style={styles.identityConfirmButton}><Text style={styles.identityConfirmText}>Yes</Text></Pressable>}
+      <Pressable onPress={onEdit} style={styles.identityEditButton}><Text style={styles.identityEditText}>Edit</Text></Pressable>
     </View>
   );
 }
@@ -836,19 +838,15 @@ function ResearchContent({
 }) {
   const estimate = result.estimate
     ? formatMoney(result.estimate.likely, result.estimate.currency)
-    : '—';
-  const hasLiveListings = result.evidence.some((listing) => typeof listing.price === 'number');
+    : 'N/A';
   return (
     <>
       <View style={styles.valuation}>
-        <Text style={styles.kicker}>ESTIMATED ASKING PRICE</Text>
-        <GradientValue value={estimate} />
+        <Text style={styles.kicker}>ESTIMATED PRICE</Text>
+        <GradientValue value={estimate} muted={!result.estimate} />
         {result.estimate && <Text style={styles.marketRange}>MARKET RANGE {formatMoney(result.estimate.low, result.estimate.currency)}–{formatMoney(result.estimate.high, result.estimate.currency)}</Text>}
-        <View style={styles.preliminaryRow}>
-          <View style={styles.preliminaryDot} />
-          <Text style={styles.preliminaryLabel}>{result.estimate ? `${result.estimate.sampleSize} ACTIVE LISTINGS · ${result.estimate.confidence}% CONFIDENCE` : 'NOT ENOUGH CLOSE MATCHES'}</Text>
-        </View>
-        {result.estimate && (
+        {result.estimate && <Text style={styles.estimateBasis}>Based on {result.estimate.sampleSize} current listings</Text>}
+        {evaluationMode && result.estimate && (
           <>
             <View style={styles.estimateFeedback}>
               <Text style={styles.estimateFeedbackLabel}>ESTIMATE</Text>
@@ -870,20 +868,12 @@ function ResearchContent({
       </View>
       <View style={styles.hairline} />
       <View style={styles.sectionHeader}>
-        <View>
-          <Text style={styles.sectionTitle}>Possible listings</Text>
-          <Text style={[styles.proofLabel, styles.previewLabel]}>
-            {hasLiveListings ? 'LIVE ASKING PRICES · NOT SOLD COMPS' : 'MARKETPLACE LINKS · NOT SOLD COMPS'}
-          </Text>
-        </View>
+        <Text style={styles.sectionTitle}>Possible listings</Text>
         <Text style={styles.sectionCount}>{result.evidence.length} FOUND</Text>
       </View>
-      <Text style={styles.sectionDescription}>{result.evidence.length > 0 ? 'Open a marketplace to compare similar items.' : result.disclosure}</Text>
       {result.evidence.length === 0 ? (
         <View style={styles.noListings}>
-          <Ionicons name="filter-outline" color="#777777" size={22} />
-          <Text style={styles.noListingsTitle}>No close listings</Text>
-          <Text style={styles.noListingsCopy}>Estimit removed results that did not match the model, version, item type, or condition closely enough.</Text>
+          <Text style={styles.noListingsTitle}>No marketplace listings found</Text>
         </View>
       ) : <ScrollView style={styles.listScroll} contentContainerStyle={styles.listings} showsVerticalScrollIndicator={false}>
         {result.evidence.map((listing, index) => (
@@ -902,7 +892,6 @@ function ResearchContent({
             <View style={styles.listingCopy}>
               <View style={styles.listingMeta}>
                 <Text style={styles.listingSource}>{listing.source.toUpperCase()}</Text>
-                <Text style={styles.matchScore}>{listing.matchScore}% ID MATCH</Text>
               </View>
               <Text numberOfLines={1} style={styles.listingTitle}>{listing.title}</Text>
               <Text numberOfLines={1} style={styles.listingDetail}>{listing.detail}</Text>
@@ -953,7 +942,8 @@ function ErrorContent({ onRetry }: { onRetry: () => void }) {
   );
 }
 
-function GradientValue({ value }: { value: string }) {
+function GradientValue({ value, muted = false }: { value: string; muted?: boolean }) {
+  if (muted) return <View style={styles.gradientValue}><Text style={[styles.valueMask, styles.valueMuted]}>{value}</Text></View>;
   return (
     <MaskedView style={styles.gradientValue} maskElement={<Text style={styles.valueMask}>{value}</Text>}>
       <LinearGradient colors={['#3EAA5B', '#A3F39E']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={StyleSheet.absoluteFill} />
@@ -970,7 +960,8 @@ const styles = StyleSheet.create({
   cameraFallback: { flex: 1, backgroundColor: '#080808' },
   cameraShade: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.08)' },
   safeArea: { flex: 1, paddingHorizontal: 20, paddingBottom: 12 },
-  historyShortcut: { position: 'absolute', top: 10, right: 20, zIndex: 4, paddingVertical: 8, paddingLeft: 12 },
+  cameraTopBar: { height: 50, alignItems: 'flex-end', justifyContent: 'center' },
+  historyShortcut: { paddingVertical: 8, paddingLeft: 12 },
   historyShortcutPressed: { opacity: 0.55 },
   historyShortcutText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700', letterSpacing: -0.15 },
   captureDock: { marginTop: 'auto', position: 'relative', alignItems: 'center' },
@@ -998,19 +989,20 @@ const styles = StyleSheet.create({
   sheetHeaderCopy: { flex: 1, paddingRight: 16 },
   kicker: { color: '#A9ADA9', fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
   itemName: { color: '#FFFFFF', marginTop: 6, fontSize: 29, lineHeight: 33, fontWeight: '800', letterSpacing: -1.45 },
+  itemNameResult: { marginTop: 0 },
   itemDetails: { color: '#9A9A9A', marginTop: 3, fontSize: 14, fontWeight: '500' },
   closeButton: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: '#181818', borderWidth: 1, borderColor: '#363636' },
-  identityCheck: { marginHorizontal: 20, marginTop: 15, minHeight: 54, paddingLeft: 13, paddingRight: 8, borderRadius: 13, borderWidth: 1, borderColor: '#3A3A3A', backgroundColor: '#171717', flexDirection: 'row', alignItems: 'center' },
+  identityCheck: { marginHorizontal: 20, marginTop: 14, minHeight: 46, paddingLeft: 13, paddingRight: 7, borderRadius: 12, borderWidth: 1, borderColor: '#3A3A3A', backgroundColor: '#171717', flexDirection: 'row', alignItems: 'center' },
   identityCheckConfirmed: { borderColor: '#315A39', backgroundColor: '#111B13' },
-  identityCheckCopy: { flex: 1, paddingVertical: 9 },
+  identityCheckCopy: { flex: 1, paddingVertical: 8 },
   identityCheckLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  identityCheckLabel: { color: '#D2D2D2', fontSize: 8, fontWeight: '900', letterSpacing: 1.15 },
+  identityCheckLabel: { color: '#D2D2D2', fontSize: 12, fontWeight: '700', letterSpacing: -0.1 },
   identityCheckLabelConfirmed: { color: '#8CE798' },
-  identityCheckDetail: { color: '#7F7F7F', marginTop: 4, fontSize: 9.5, fontWeight: '600' },
-  identityConfirmButton: { height: 34, minWidth: 48, paddingHorizontal: 12, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: '#E8E8E8' },
-  identityConfirmText: { color: '#111111', fontSize: 9, fontWeight: '900', letterSpacing: 1 },
-  identityEditButton: { height: 34, minWidth: 50, alignItems: 'center', justifyContent: 'center' },
-  identityEditText: { color: '#A7A7A7', fontSize: 8.5, fontWeight: '900', letterSpacing: 1 },
+  identityCheckDetail: { color: '#7F7F7F', marginTop: 2, fontSize: 10, fontWeight: '600' },
+  identityConfirmButton: { height: 32, minWidth: 48, paddingHorizontal: 12, borderRadius: 9, alignItems: 'center', justifyContent: 'center', backgroundColor: '#E8E8E8' },
+  identityConfirmText: { color: '#111111', fontSize: 12, fontWeight: '800' },
+  identityEditButton: { height: 32, minWidth: 48, alignItems: 'center', justifyContent: 'center' },
+  identityEditText: { color: '#A7A7A7', fontSize: 12, fontWeight: '700' },
   identityEditor: { marginHorizontal: 20, marginTop: 15, padding: 13, borderRadius: 15, borderWidth: 1, borderColor: '#424242', backgroundColor: '#151515' },
   identityEditorHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 11 },
   identityTitle: { color: '#F5F5F7', fontSize: 15, fontWeight: '800', letterSpacing: -0.25 },
@@ -1032,13 +1024,12 @@ const styles = StyleSheet.create({
   valuation: { paddingHorizontal: 20, paddingTop: 27 },
   gradientValue: { marginTop: 6, height: 58, alignSelf: 'stretch' },
   valueMask: { color: '#FFFFFF', fontSize: 43, lineHeight: 53, fontWeight: '800', letterSpacing: -2.1 },
+  valueMuted: { color: '#777777' },
   confidenceRow: { flexDirection: 'row', alignItems: 'center', marginTop: 5 },
   confidenceLabel: { color: '#A1A1A1', fontSize: 14, fontWeight: '600' },
   confidenceValue: { fontSize: 14, fontWeight: '800' },
-  preliminaryRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 5 },
   marketRange: { color: '#B8B8B8', marginTop: 2, fontSize: 11, fontWeight: '700', letterSpacing: 0.2 },
-  preliminaryDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: '#E4CF86' },
-  preliminaryLabel: { color: '#A7A7A7', fontSize: 8, fontWeight: '800', letterSpacing: 1 },
+  estimateBasis: { color: '#777777', marginTop: 5, fontSize: 10.5, fontWeight: '600' },
   estimateFeedback: { flexDirection: 'row', alignItems: 'center', gap: 14, marginTop: 12 },
   estimateFeedbackLabel: { color: '#666666', fontSize: 7.5, fontWeight: '900', letterSpacing: 1 },
   estimateFeedbackOption: { color: '#8A8A8A', fontSize: 8, fontWeight: '900', letterSpacing: 0.75 },
@@ -1057,9 +1048,8 @@ const styles = StyleSheet.create({
   evidenceNoteText: { flex: 1, color: '#A7A7A7', fontSize: 10.5, lineHeight: 14 },
   listScroll: { flex: 1, marginTop: 5 },
   listings: { paddingHorizontal: 20, paddingBottom: 8 },
-  noListings: { flex: 1, marginHorizontal: 20, marginTop: 18, paddingVertical: 28, paddingHorizontal: 24, borderRadius: 15, borderWidth: 1, borderColor: '#303030', backgroundColor: '#151515', alignItems: 'center' },
-  noListingsTitle: { color: '#E8E8E8', marginTop: 10, fontSize: 15, fontWeight: '800' },
-  noListingsCopy: { color: '#858585', marginTop: 5, maxWidth: 290, textAlign: 'center', fontSize: 10.5, lineHeight: 15 },
+  noListings: { marginHorizontal: 20, marginTop: 12, paddingVertical: 18, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#303030' },
+  noListingsTitle: { color: '#858585', fontSize: 12, fontWeight: '600' },
   listingRow: { minHeight: 83, paddingVertical: 10, flexDirection: 'row', alignItems: 'center' },
   listingPressed: { opacity: 0.65 },
   listingImage: { width: 55, height: 55, borderRadius: 11, borderWidth: 1, borderColor: '#454545', backgroundColor: '#1A1A1A' },
