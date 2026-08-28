@@ -25,16 +25,18 @@ test('normalizes real eBay item summaries into active listing evidence', () => {
       condition: 'Used',
       price: { value: '399.99', currency: 'USD' },
       shippingOptions: [{ shippingCost: { value: '8.25', currency: 'USD' } }],
+      buyingOptions: ['FIXED_PRICE', 'BEST_OFFER'],
       image: { imageUrl: 'https://i.ebayimg.com/example.jpg' },
     }],
-  }, 'Apple iPhone 13 Pro 256GB', '2026-08-28T00:00:00.000Z');
+  }, identity, '2026-08-28T00:00:00.000Z');
 
   assert.equal(listing?.source, 'eBay');
   assert.equal(listing?.kind, 'active');
   assert.equal(listing?.price, 399.99);
   assert.equal(listing?.shipping, 8.25);
   assert.equal(listing?.url, 'https://www.ebay.com/itm/123');
-  assert.ok((listing?.matchScore ?? 0) >= 90);
+  assert.ok((listing?.matchScore ?? 0) >= 70);
+  assert.match(listing?.detail ?? '', /Best offer available/);
 });
 
 test('drops malformed, non-USD, and non-HTTPS eBay results', () => {
@@ -44,6 +46,71 @@ test('drops malformed, non-USD, and non-HTTPS eBay results', () => {
       { title: 'Wrong currency', itemWebUrl: 'https://www.ebay.com/itm/1', price: { value: '10', currency: 'EUR' } },
       { title: 'Unsafe URL', itemWebUrl: 'http://example.com/item', price: { value: '10', currency: 'USD' } },
     ],
-  }, 'item');
+  }, identity);
   assert.deepEqual(listings, []);
+});
+
+test('rejects parts, accessories, bundles, auctions, and conflicting variants for a single item', () => {
+  const valid = (id: string, title: string, price = '400', buyingOptions: string[] = ['FIXED_PRICE']) => ({
+    itemId: id,
+    title,
+    itemWebUrl: `https://www.ebay.com/itm/${id}`,
+    condition: 'Used',
+    price: { value: price, currency: 'USD' },
+    buyingOptions,
+  });
+  const listings = mapEbayItems({ itemSummaries: [
+    valid('good', 'Apple iPhone 13 Pro 256GB Unlocked'),
+    valid('parts', 'Apple iPhone 13 Pro 256GB For Parts Not Working', '90'),
+    valid('case', 'Case for Apple iPhone 13 Pro 256GB', '12'),
+    valid('bundle', 'Bundle Lot of 3 Apple iPhone 13 Pro 256GB', '900'),
+    valid('storage', 'Apple iPhone 13 Pro 128GB Unlocked', '320'),
+    valid('multi-storage', 'Apple iPhone 13 Pro 128GB or 256GB Pick One', '300'),
+    valid('model', 'Apple iPhone 13 Pro Max 256GB', '500'),
+    valid('generation', 'Apple iPhone 14 Pro 256GB', '470'),
+    valid('auction', 'Apple iPhone 13 Pro 256GB', '50', ['AUCTION']),
+  ] }, identity);
+  assert.deepEqual(listings.map((listing) => listing.id), ['good']);
+});
+
+test('deduplicates equivalent listings and removes extreme price outliers', () => {
+  const listing = (id: string, title: string, price: string) => ({
+    itemId: id,
+    title,
+    itemWebUrl: `https://www.ebay.com/itm/${id}`,
+    condition: 'Used',
+    price: { value: price, currency: 'USD' },
+    buyingOptions: ['FIXED_PRICE'],
+  });
+  const listings = mapEbayItems({ itemSummaries: [
+    listing('a', 'Apple iPhone 13 Pro 256GB Unlocked', '390'),
+    listing('duplicate', 'Apple iPhone 13 Pro 256GB Unlocked', '390'),
+    listing('b', 'Apple iPhone 13 Pro 256GB Smartphone', '410'),
+    listing('c', 'Apple iPhone 13 Pro 256GB Used', '430'),
+    listing('d', 'Apple iPhone 13 Pro 256GB Sierra Blue', '450'),
+    listing('outlier', 'Apple iPhone 13 Pro 256GB Rare', '4000'),
+  ] }, identity);
+  assert.equal(listings.length, 4);
+  assert.equal(listings.some((item) => item.id === 'duplicate'), false);
+  assert.equal(listings.some((item) => item.id === 'outlier'), false);
+});
+
+test('keeps descriptive generic items without confusing product materials for replacement parts', () => {
+  const generic: Identification = {
+    ...identity,
+    category: 'computer peripheral',
+    brand: 'unknown',
+    model: 'wired gaming mouse',
+    variant: 'honeycomb shell',
+    attributes: [{ name: 'connectivity', value: 'wired' }],
+  };
+  const listings = mapEbayItems({ itemSummaries: [{
+    itemId: 'mouse',
+    title: 'Wired Honeycomb Shell RGB Gaming Mouse',
+    itemWebUrl: 'https://www.ebay.com/itm/mouse',
+    condition: 'Used',
+    price: { value: '19.99', currency: 'USD' },
+    buyingOptions: ['FIXED_PRICE'],
+  }] }, generic);
+  assert.equal(listings.length, 1);
 });

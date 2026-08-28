@@ -695,7 +695,7 @@ function ValuationContent({ result, identityConfirmed, onOpenEvidence }: { resul
 function ResearchContent({ result, onOpenEvidence }: { result: ResearchResult; onOpenEvidence: (evidence: MarketEvidence) => void }) {
   const estimate = result.estimate
     ? `${formatMoney(result.estimate.low, result.estimate.currency)}–${formatMoney(result.estimate.high, result.estimate.currency)}`
-    : 'Not enough detail';
+    : '—';
   const hasLiveListings = result.evidence.some((listing) => typeof listing.price === 'number');
   return (
     <>
@@ -704,7 +704,7 @@ function ResearchContent({ result, onOpenEvidence }: { result: ResearchResult; o
         <GradientValue value={estimate} />
         <View style={styles.preliminaryRow}>
           <View style={styles.preliminaryDot} />
-          <Text style={styles.preliminaryLabel}>PRELIMINARY RANGE · VISUAL IDENTIFICATION</Text>
+          <Text style={styles.preliminaryLabel}>{result.estimate ? 'PRELIMINARY RANGE · CLOSE LISTINGS FOUND' : 'NOT ENOUGH CLOSE MATCHES'}</Text>
         </View>
       </View>
       <View style={styles.hairline} />
@@ -717,8 +717,14 @@ function ResearchContent({ result, onOpenEvidence }: { result: ResearchResult; o
         </View>
         <Text style={styles.sectionCount}>{result.evidence.length} FOUND</Text>
       </View>
-      <Text style={styles.sectionDescription}>Open a marketplace to compare similar items.</Text>
-      <ScrollView style={styles.listScroll} contentContainerStyle={styles.listings} showsVerticalScrollIndicator={false}>
+      <Text style={styles.sectionDescription}>{result.evidence.length > 0 ? 'Open a marketplace to compare similar items.' : result.disclosure}</Text>
+      {result.evidence.length === 0 ? (
+        <View style={styles.noListings}>
+          <Ionicons name="filter-outline" color="#777777" size={22} />
+          <Text style={styles.noListingsTitle}>No close listings</Text>
+          <Text style={styles.noListingsCopy}>Estimit removed results that did not match the model, version, item type, or condition closely enough.</Text>
+        </View>
+      ) : <ScrollView style={styles.listScroll} contentContainerStyle={styles.listings} showsVerticalScrollIndicator={false}>
         {result.evidence.map((listing, index) => (
           <Pressable
             accessibilityRole="link"
@@ -747,7 +753,7 @@ function ResearchContent({ result, onOpenEvidence }: { result: ResearchResult; o
             {index < result.evidence.length - 1 && <View style={styles.listingDivider} />}
           </Pressable>
         ))}
-      </ScrollView>
+      </ScrollView>}
     </>
   );
 }
@@ -879,6 +885,9 @@ const styles = StyleSheet.create({
   evidenceNoteText: { flex: 1, color: '#A7A7A7', fontSize: 10.5, lineHeight: 14 },
   listScroll: { flex: 1, marginTop: 5 },
   listings: { paddingHorizontal: 20, paddingBottom: 8 },
+  noListings: { flex: 1, marginHorizontal: 20, marginTop: 18, paddingVertical: 28, paddingHorizontal: 24, borderRadius: 15, borderWidth: 1, borderColor: '#303030', backgroundColor: '#151515', alignItems: 'center' },
+  noListingsTitle: { color: '#E8E8E8', marginTop: 10, fontSize: 15, fontWeight: '800' },
+  noListingsCopy: { color: '#858585', marginTop: 5, maxWidth: 290, textAlign: 'center', fontSize: 10.5, lineHeight: 15 },
   listingRow: { minHeight: 83, paddingVertical: 10, flexDirection: 'row', alignItems: 'center' },
   listingPressed: { opacity: 0.65 },
   listingImage: { width: 55, height: 55, borderRadius: 11, borderWidth: 1, borderColor: '#454545', backgroundColor: '#1A1A1A' },

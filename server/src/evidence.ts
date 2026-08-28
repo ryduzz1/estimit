@@ -1,5 +1,5 @@
 import type { Identification, MarketEvidence } from './domain.js';
-import { buildEbaySearchQuery, findEbayListings } from './ebay.js';
+import { buildEbaySearchQuery, ebayIsConfigured, findEbayListings } from './ebay.js';
 
 export async function findEvidence(identity: Identification): Promise<MarketEvidence[]> {
   const label = buildEbaySearchQuery(identity);
@@ -9,6 +9,9 @@ export async function findEvidence(identity: Identification): Promise<MarketEvid
   try {
     const ebayListings = await findEbayListings(identity);
     if (ebayListings.length > 0) return ebayListings;
+    // A successful provider query with no safe matches is an honest empty result.
+    // Do not replace it with broad search links that look like vetted evidence.
+    if (ebayIsConfigured()) return [];
   } catch (error) {
     // Marketplace availability must not make the entire scan fail. The source-search
     // links below remain useful while the provider recovers or credentials are fixed.
