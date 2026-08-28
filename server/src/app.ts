@@ -8,10 +8,11 @@ import { authenticateInstallation, createInstallation, databaseIsReady, getEvalu
 import { identificationSchema, type Identification, type ResearchResult, type ValuationResult } from './domain.js';
 import { findEvidence } from './evidence.js';
 import { hasUsableSearchIdentity, identifyItem, targetedPhotoRequest } from './identify.js';
-import { calculateActiveMarketEstimate, calculateValuation } from './pricing.js';
+import { calculateResearchEstimate, calculateValuation } from './pricing.js';
 
 const allowedImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
 const installationIds = new WeakMap<FastifyRequest, string>();
+class EstimateUnavailableError extends Error {}
 const feedbackSchema = z.object({
   scanId: z.uuid(),
   identityVerdict: z.enum(['confirmed', 'corrected', 'wrong']).optional(),
@@ -64,7 +65,8 @@ async function evaluateIdentity(id: string, identity: Identification): Promise<R
   const evidence = await findEvidence(identity);
   const soldEvidence = evidence.filter((entry) => entry.kind === 'sold' && typeof entry.price === 'number');
   if (soldEvidence.length > 0) return calculateValuation(id, identity, evidence);
-  const activeEstimate = calculateActiveMarketEstimate(identity, evidence);
+  const activeEstimate = calculateResearchEstimate(identity, evidence);
+  if (!activeEstimate) throw new EstimateUnavailableError('A recognizable item did not produce a pricing signal.');
   return {
     status: 'research_only',
     id,
@@ -72,9 +74,9 @@ async function evaluateIdentity(id: string, identity: Identification): Promise<R
     identification: identity,
     estimate: activeEstimate,
     evidence,
-    disclosure: activeEstimate
-      ? `Calculated from ${activeEstimate.sampleSize} closely matched active listings, including shipping when available. This reflects asking prices, not completed sales.`
-      : 'No estimate is shown because Estimit did not find enough closely matched listings. Broad or questionable results were removed.',
+    disclosure: activeEstimate.basis === 'active_listings'
+      ? `Calculated from ${activeEstimate.sampleSize} active listings, including shipping when available. Confidence reflects how closely those listings agree.`
+      : 'A low-confidence visual estimate is shown because close marketplace listings were unavailable.',
   };
 }
 
@@ -166,7 +168,17 @@ export function buildApp() {
         requestedPhoto: targetedPhotoRequest(identity),
       });
     }
-    const result = await evaluateIdentity(id, identity);
+    let result: ResearchResult | ValuationResult;
+    try {
+      result = await evaluateIdentity(id, identity);
+    } catch (error) {
+      if (!(error instanceof EstimateUnavailableError)) throw error;
+      return reply.code(422).send({
+        error: 'insufficient_identification',
+        identification: identity,
+        requestedPhoto: targetedPhotoRequest(identity),
+      });
+    }
     await recordScanEvaluation(result, installationId).catch((error) => {
       request.log.warn({ err: error, scanId: result.id }, 'Could not record privacy-safe evaluation metrics');
     });
@@ -182,12 +194,16 @@ export function buildApp() {
     const identity: Identification = {
       ...parsed.data,
       identificationConfidence: 1,
-      visualEstimateLow: null,
-      visualEstimateHigh: null,
       requestedPhoto: null,
     };
     if (!hasUsableSearchIdentity(identity)) return reply.code(400).send({ error: 'identity_not_searchable' });
-    const result = await evaluateIdentity(randomUUID(), identity);
+    let result: ResearchResult | ValuationResult;
+    try {
+      result = await evaluateIdentity(randomUUID(), identity);
+    } catch (error) {
+      if (!(error instanceof EstimateUnavailableError)) throw error;
+      return reply.code(422).send({ error: 'insufficient_pricing_evidence' });
+    }
     await recordScanEvaluation(result, installationIds.get(request), true).catch((error) => {
       request.log.warn({ err: error, scanId: result.id }, 'Could not record refined evaluation metrics');
     });

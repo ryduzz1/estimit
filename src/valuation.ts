@@ -66,9 +66,9 @@ export type ResearchResult = {
     high: number;
     currency: 'USD';
     confidence: number;
-    basis: 'active_listings';
+    basis: 'active_listings' | 'visual_estimate';
     sampleSize: number;
-  } | null;
+  };
   evidence: MarketEvidence[];
   disclosure: string;
 };

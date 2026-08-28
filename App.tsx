@@ -32,13 +32,6 @@ const evaluationMode = process.env.EXPO_PUBLIC_ESTIMIT_EVALUATION_MODE === 'true
 
 const gemMark = require('./assets/estimit-gem-mark.png');
 
-function confidenceColor(score: number) {
-  if (score >= 80) return '#85E89A';
-  if (score >= 60) return '#E8D961';
-  if (score >= 40) return '#FF9A5D';
-  return '#FA6868';
-}
-
 function validHistoryEntry(value: unknown): value is HistoryEntry {
   if (!value || typeof value !== 'object') return false;
   const entry = value as Record<string, unknown>;
@@ -69,7 +62,7 @@ async function persistHistory(entries: HistoryEntry[]) {
 function historyEntryFor(result: ValuationResult | ResearchResult): HistoryEntry {
   const isResearch = 'status' in result;
   const value = isResearch
-    ? result.estimate ? formatMoney(result.estimate.likely, result.estimate.currency) : 'N/A'
+    ? formatMoney(result.estimate.likely, result.estimate.currency)
     : formatEstimate(result);
   const count = result.evidence.length;
   return {
@@ -750,10 +743,7 @@ function ValuationContent({ result, identityConfirmed, onOpenEvidence }: { resul
       <View style={styles.valuation}>
         <Text style={styles.kicker}>ESTIMATED RESALE VALUE</Text>
         <GradientValue value={formatEstimate(result)} />
-        <View style={styles.confidenceRow}>
-          <Text style={styles.confidenceLabel}>Confidence score: </Text>
-          <Text style={[styles.confidenceValue, { color: confidenceColor(result.estimate.confidence) }]}>{result.estimate.confidence}%</Text>
-        </View>
+        <Text style={styles.priceConfidence}>{result.estimate.confidence}% confidence</Text>
       </View>
 
       <View style={styles.hairline} />
@@ -836,17 +826,15 @@ function ResearchContent({
   onPriceFeedback: (verdict: 'low' | 'fair' | 'high') => void;
   onOpenEvidence: (evidence: MarketEvidence) => void;
 }) {
-  const estimate = result.estimate
-    ? formatMoney(result.estimate.likely, result.estimate.currency)
-    : 'N/A';
+  const estimate = formatMoney(result.estimate.likely, result.estimate.currency);
   return (
     <>
       <View style={styles.valuation}>
         <Text style={styles.kicker}>ESTIMATED PRICE</Text>
-        <GradientValue value={estimate} muted={!result.estimate} />
-        {result.estimate && <Text style={styles.marketRange}>MARKET RANGE {formatMoney(result.estimate.low, result.estimate.currency)}–{formatMoney(result.estimate.high, result.estimate.currency)}</Text>}
-        {result.estimate && <Text style={styles.estimateBasis}>Based on {result.estimate.sampleSize} current listings</Text>}
-        {evaluationMode && result.estimate && (
+        <GradientValue value={estimate} />
+        <Text style={styles.priceConfidence}>{result.estimate.confidence}% confidence</Text>
+        <Text style={styles.marketRange}>MARKET RANGE {formatMoney(result.estimate.low, result.estimate.currency)}–{formatMoney(result.estimate.high, result.estimate.currency)}</Text>
+        {evaluationMode && (
           <>
             <View style={styles.estimateFeedback}>
               <Text style={styles.estimateFeedbackLabel}>ESTIMATE</Text>
@@ -942,8 +930,7 @@ function ErrorContent({ onRetry }: { onRetry: () => void }) {
   );
 }
 
-function GradientValue({ value, muted = false }: { value: string; muted?: boolean }) {
-  if (muted) return <View style={styles.gradientValue}><Text style={[styles.valueMask, styles.valueMuted]}>{value}</Text></View>;
+function GradientValue({ value }: { value: string }) {
   return (
     <MaskedView style={styles.gradientValue} maskElement={<Text style={styles.valueMask}>{value}</Text>}>
       <LinearGradient colors={['#3EAA5B', '#A3F39E']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={StyleSheet.absoluteFill} />
@@ -1024,12 +1011,8 @@ const styles = StyleSheet.create({
   valuation: { paddingHorizontal: 20, paddingTop: 27 },
   gradientValue: { marginTop: 6, height: 58, alignSelf: 'stretch' },
   valueMask: { color: '#FFFFFF', fontSize: 43, lineHeight: 53, fontWeight: '800', letterSpacing: -2.1 },
-  valueMuted: { color: '#777777' },
-  confidenceRow: { flexDirection: 'row', alignItems: 'center', marginTop: 5 },
-  confidenceLabel: { color: '#A1A1A1', fontSize: 14, fontWeight: '600' },
-  confidenceValue: { fontSize: 14, fontWeight: '800' },
-  marketRange: { color: '#B8B8B8', marginTop: 2, fontSize: 11, fontWeight: '700', letterSpacing: 0.2 },
-  estimateBasis: { color: '#777777', marginTop: 5, fontSize: 10.5, fontWeight: '600' },
+  priceConfidence: { color: '#777777', marginTop: 2, fontSize: 10.5, fontWeight: '600' },
+  marketRange: { color: '#A2A2A2', marginTop: 5, fontSize: 10.5, fontWeight: '600', letterSpacing: 0.1 },
   estimateFeedback: { flexDirection: 'row', alignItems: 'center', gap: 14, marginTop: 12 },
   estimateFeedbackLabel: { color: '#666666', fontSize: 7.5, fontWeight: '900', letterSpacing: 1 },
   estimateFeedbackOption: { color: '#8A8A8A', fontSize: 8, fontWeight: '900', letterSpacing: 0.75 },

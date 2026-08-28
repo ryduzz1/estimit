@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Identification, MarketEvidence } from '../src/domain.js';
-import { calculateActiveMarketEstimate, calculateValuation, marketQualityPolicy } from '../src/pricing.js';
+import { calculateActiveMarketEstimate, calculateResearchEstimate, calculateValuation, marketQualityPolicy } from '../src/pricing.js';
 
 const identity: Identification = {
   category: 'smartphone', brand: 'Apple', model: 'iPhone 13 Pro', variant: '256GB', condition: 'good',
@@ -42,13 +42,15 @@ test('calculates a deterministic asking-price center and range from close active
   assert.ok((estimate?.confidence ?? 100) <= 80);
 });
 
-test('withholds an asking-price estimate when fewer than three close listings exist', () => {
+test('returns a low-confidence asking-price estimate from a small sample', () => {
   const observedAt = new Date().toISOString();
   const evidence: MarketEvidence[] = [
     { id: 'a', source: 'eBay', title: 'A', detail: '', price: 100, kind: 'active', url: 'https://example.com/a', matchScore: 95, observedAt },
     { id: 'b', source: 'eBay', title: 'B', detail: '', price: 120, kind: 'active', url: 'https://example.com/b', matchScore: 94, observedAt },
   ];
-  assert.equal(calculateActiveMarketEstimate(identity, evidence), null);
+  const estimate = calculateActiveMarketEstimate(identity, evidence);
+  assert.equal(estimate?.likely, 110);
+  assert.ok((estimate?.confidence ?? 100) <= 40);
 });
 
 test('requires more evidence and caps confidence for generic or non-standard items', () => {
@@ -64,14 +66,26 @@ test('requires more evidence and caps confidence for generic or non-standard ite
     id: String(index), source: 'eBay', title: 'Mouse', detail: '', price, kind: 'active' as const,
     url: `https://example.com/${index}`, matchScore: 95, observedAt,
   }));
-  assert.equal(calculateActiveMarketEstimate(generic, evidence), null);
+  const estimate = calculateActiveMarketEstimate(generic, evidence);
+  assert.equal(estimate?.likely, 105);
+  assert.ok((estimate?.confidence ?? 100) <= 50);
 });
 
-test('declines unstable markets with an excessively wide central range', () => {
+test('returns an unstable market range with sharply reduced confidence', () => {
   const observedAt = new Date().toISOString();
   const evidence: MarketEvidence[] = [10, 20, 100, 200, 220].map((price, index) => ({
     id: String(index), source: 'eBay', title: 'Item', detail: '', price, kind: 'active' as const,
     url: `https://example.com/wide-${index}`, matchScore: 95, observedAt,
   }));
-  assert.equal(calculateActiveMarketEstimate(identity, evidence), null);
+  const estimate = calculateActiveMarketEstimate(identity, evidence);
+  assert.deepEqual({ low: estimate?.low, likely: estimate?.likely, high: estimate?.high }, { low: 20, likely: 100, high: 200 });
+  assert.ok((estimate?.confidence ?? 100) <= 30);
+});
+
+test('falls back to a low-confidence visual estimate without marketplace prices', () => {
+  const estimate = calculateResearchEstimate(identity, []);
+  assert.deepEqual({ low: estimate?.low, likely: estimate?.likely, high: estimate?.high, basis: estimate?.basis }, {
+    low: 350, likely: 400, high: 450, basis: 'visual_estimate',
+  });
+  assert.ok((estimate?.confidence ?? 100) <= 38);
 });
