@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { File, Paths } from 'expo-file-system';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -13,7 +14,7 @@ import { refineIdentity, requestValuation, ScanOutcome, ValuationApiError } from
 import { formatEstimate, formatMoney, Identification, MarketEvidence, ResearchResult, ValuationResult } from './src/valuation';
 
 type ScanState = 'ready' | 'scanning' | 'result';
-type HistoryEntry = { id: string; name: string; value: string; detail: string };
+type HistoryEntry = { id: string; name: string; value: string; detail: string; createdAt: string };
 type SheetOutcome = ScanOutcome | { kind: 'error'; message: string };
 type IdentityDraft = Pick<Identification, 'brand' | 'model' | 'variant' | 'category' | 'itemForm' | 'condition'> & { quantity: string };
 
@@ -25,6 +26,8 @@ const itemFormOptions: Array<{ value: Identification['itemForm']; label: string 
   { value: 'packaging', label: 'BOX' },
 ];
 const conditionOptions: Identification['condition'][] = ['poor', 'fair', 'good', 'excellent', 'unknown'];
+const HISTORY_FILE_NAME = 'estimit-history-v1.json';
+const HISTORY_LIMIT = 100;
 
 const gemMark = require('./assets/estimit-gem-mark.png');
 
@@ -33,6 +36,54 @@ function confidenceColor(score: number) {
   if (score >= 60) return '#E8D961';
   if (score >= 40) return '#FF9A5D';
   return '#FA6868';
+}
+
+function validHistoryEntry(value: unknown): value is HistoryEntry {
+  if (!value || typeof value !== 'object') return false;
+  const entry = value as Record<string, unknown>;
+  return ['id', 'name', 'value', 'detail', 'createdAt'].every((key) => typeof entry[key] === 'string');
+}
+
+async function loadHistory() {
+  try {
+    const file = new File(Paths.document, HISTORY_FILE_NAME);
+    if (!file.exists) return [];
+    const parsed = JSON.parse(await file.text()) as unknown;
+    return Array.isArray(parsed) ? parsed.filter(validHistoryEntry).slice(0, HISTORY_LIMIT) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function persistHistory(entries: HistoryEntry[]) {
+  try {
+    const file = new File(Paths.document, HISTORY_FILE_NAME);
+    if (!file.exists) file.create({ intermediates: true });
+    file.write(JSON.stringify(entries.slice(0, HISTORY_LIMIT)));
+  } catch {
+    // A storage failure should never interrupt a scan result.
+  }
+}
+
+function historyEntryFor(result: ValuationResult | ResearchResult): HistoryEntry {
+  const isResearch = 'status' in result;
+  const value = isResearch
+    ? result.estimate ? formatMoney(result.estimate.likely, result.estimate.currency) : 'No range'
+    : formatEstimate(result);
+  const count = result.evidence.length;
+  return {
+    id: result.id,
+    name: result.item.name,
+    value,
+    detail: `${count} ${count === 1 ? 'listing' : 'listings'}`,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function historyTimestamp(createdAt: string) {
+  const date = new Date(createdAt);
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(date);
 }
 
 export default function App() {
@@ -64,12 +115,25 @@ export default function App() {
   const scanStateRef = useRef(scanState);
   const historyOpenRef = useRef(historyOpen);
   const followupHintsRef = useRef<string | null>(null);
+  const activeHistoryIdRef = useRef<string | null>(null);
   const result = outcome?.kind === 'valuation' ? outcome.result : null;
   const identifiedResult = outcome?.kind === 'valuation' || outcome?.kind === 'research' ? outcome.result : null;
 
   useEffect(() => {
     if (permission && !permission.granted && permission.canAskAgain) requestPermission();
   }, [permission, requestPermission]);
+
+  useEffect(() => {
+    let active = true;
+    loadHistory().then((entries) => {
+      if (active) setHistoryEntries((current) => {
+        if (current.length === 0) return entries;
+        const currentIds = new Set(current.map((entry) => entry.id));
+        return [...current, ...entries.filter((entry) => !currentIds.has(entry.id))].slice(0, HISTORY_LIMIT);
+      });
+    });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     scanStateRef.current = scanState;
@@ -127,10 +191,22 @@ export default function App() {
 
   const beginScan = () => {
     if (scanStateRef.current !== 'ready') return false;
+    activeHistoryIdRef.current = null;
     scanStateRef.current = 'scanning';
     setScanState('scanning');
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     return true;
+  };
+
+  const recordHistory = (completed: ValuationResult | ResearchResult, replaceId?: string | null) => {
+    const entry = historyEntryFor(completed);
+    setHistoryEntries((entries) => {
+      const withoutCurrent = entries.filter((existing) => existing.id !== entry.id && (!replaceId || existing.id !== replaceId));
+      const next = [entry, ...withoutCurrent].slice(0, HISTORY_LIMIT);
+      void persistHistory(next);
+      return next;
+    });
+    activeHistoryIdRef.current = entry.id;
   };
 
   const scanImage = async (uri: string, scanAlreadyStarted = false) => {
@@ -182,19 +258,13 @@ export default function App() {
         followupHintsRef.current = `Previous scan candidate: ${identity.brand} ${identity.model} ${identity.variant}. Missing details: ${identity.missingDetails.join(', ')}.`;
       } else {
         followupHintsRef.current = null;
+        recordHistory(remote.value.result);
       }
       await Haptics.notificationAsync(remote.value.kind === 'valuation'
         ? Haptics.NotificationFeedbackType.Success
         : Haptics.NotificationFeedbackType.Warning);
     }
 
-    if ('value' in remote && remote.value.kind === 'valuation') {
-      const valuation = remote.value.result;
-      setHistoryEntries((entries) => [
-        { id: valuation.id, name: valuation.item.name, value: formatEstimate(valuation), detail: `${valuation.evidence.length} market links · just now` },
-        ...entries,
-      ]);
-    }
     setScanState('result');
   };
 
@@ -345,6 +415,7 @@ export default function App() {
         attributes: [],
         identifiers: [],
       });
+      recordHistory(revised.result, activeHistoryIdRef.current);
       setOutcome(revised);
       setIdentityConfirmed(true);
       setEditingIdentity(false);
@@ -417,6 +488,11 @@ export default function App() {
       </View>
 
       <SafeAreaView style={styles.safeArea} {...historyPanResponder.panHandlers}>
+        {scanState === 'ready' && (
+          <Pressable accessibilityRole="button" accessibilityLabel="Open scan history" onPress={() => setHistoryVisible(true)} hitSlop={12} style={({ pressed }) => [styles.historyShortcut, pressed && styles.historyShortcutPressed]}>
+            <Text style={styles.historyShortcutText}>History ›</Text>
+          </Pressable>
+        )}
         <View style={styles.captureDock}>
           {scanState === 'scanning' && (
             <View style={styles.scanStatusPill}>
@@ -513,7 +589,7 @@ export default function App() {
                   <View style={styles.historyGem}><Ionicons name="diamond" color="#F5F5F7" size={15} /></View>
                   <View style={styles.historyCopy}>
                     <Text style={styles.historyItemName}>{entry.name}</Text>
-                    <Text style={styles.historyItemDetail}>{entry.detail}</Text>
+                    <Text style={styles.historyItemDetail}>{entry.detail} · {historyTimestamp(entry.createdAt)}</Text>
                   </View>
                   <Text style={styles.historyValue}>{entry.value}</Text>
                 </View>
@@ -810,6 +886,9 @@ const styles = StyleSheet.create({
   cameraFallback: { flex: 1, backgroundColor: '#080808' },
   cameraShade: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.08)' },
   safeArea: { flex: 1, paddingHorizontal: 20, paddingBottom: 12 },
+  historyShortcut: { position: 'absolute', top: 10, right: 20, zIndex: 4, paddingVertical: 8, paddingLeft: 12 },
+  historyShortcutPressed: { opacity: 0.55 },
+  historyShortcutText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700', letterSpacing: -0.15 },
   captureDock: { marginTop: 'auto', position: 'relative', alignItems: 'center' },
   scanStatusPill: { position: 'absolute', bottom: 94, minWidth: 238, alignItems: 'center', paddingHorizontal: 18, paddingVertical: 11, borderRadius: 18, backgroundColor: 'rgba(8,8,8,0.88)', borderWidth: 1, borderColor: '#343434' },
   scanStatusTitle: { color: '#F5F5F7', fontSize: 13, fontWeight: '800' },
