@@ -46,10 +46,10 @@ public class EstimitVisionModule: Module {
 
     // A simple multiply darkens the background without altering its contrast or color balance.
     let dimmed = original.applyingFilter("CIColorMatrix", parameters: [
-      kCIInputRVectorKey: CIVector(x: 0.32, y: 0, z: 0, w: 0),
-      kCIInputGVectorKey: CIVector(x: 0, y: 0.32, z: 0, w: 0),
-      kCIInputBVectorKey: CIVector(x: 0, y: 0, z: 0.32, w: 0),
-      kCIInputAVectorKey: CIVector(x: 0, y: 0, z: 0, w: 1),
+      "inputRVector": CIVector(x: 0.32, y: 0, z: 0, w: 0),
+      "inputGVector": CIVector(x: 0, y: 0.32, z: 0, w: 0),
+      "inputBVector": CIVector(x: 0, y: 0, z: 0.32, w: 0),
+      "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
     ])
 
     // Expanding the mask leaves a precise colored edge after the untouched object is composited back.

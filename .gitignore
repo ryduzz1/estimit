@@ -15,6 +15,8 @@ npm-debug.*
 yarn-debug.*
 yarn-error.*
 .env*.local
+.env
+server/.env
 *.tsbuildinfo
 
 # Expo prebuild output: generated from app.json when needed

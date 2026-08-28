@@ -7,20 +7,16 @@ import MaskedView from '@react-native-masked-view/masked-view';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Image, PanResponder, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Alert, Animated, Easing, Image, Linking, PanResponder, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import EstimitVision from './modules/estim-vision/src/EstimitVisionModule';
+import { requestValuation, ScanOutcome, ValuationApiError } from './src/api';
+import { formatEstimate, formatMoney, MarketEvidence, ResearchResult, ValuationResult } from './src/valuation';
 
 type ScanState = 'ready' | 'scanning' | 'result';
 type HistoryEntry = { id: string; name: string; value: string; detail: string };
+type SheetOutcome = ScanOutcome | { kind: 'error'; message: string };
 
-const confidence = 89;
-const listingImage = 'https://images.unsplash.com/photo-1632661674596-df8be070a5c5?auto=format&fit=crop&w=240&q=80';
 const gemMark = require('./assets/estimit-gem-mark.png');
-const listings = [
-  { source: 'Swappa', title: 'iPhone 13 Pro · 256GB', detail: 'Unlocked · Good condition', price: '$412' },
-  { source: 'eBay', title: 'Apple iPhone 13 Pro', detail: 'Sierra Blue · 256GB', price: '$399' },
-  { source: 'Back Market', title: 'iPhone 13 Pro Refurbished', detail: 'Excellent condition', price: '$429' },
-];
 
 function confidenceColor(score: number) {
   if (score >= 80) return '#85E89A';
@@ -37,6 +33,7 @@ export default function App() {
   const [torchEnabled, setTorchEnabled] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
+  const [outcome, setOutcome] = useState<SheetOutcome | null>(null);
   const { width } = useWindowDimensions();
   const cameraRef = useRef<CameraView>(null);
   const sheetProgress = useRef(new Animated.Value(0)).current;
@@ -44,9 +41,16 @@ export default function App() {
   const frozenPreviewOpacity = useRef(new Animated.Value(0)).current;
   const scanPreviewOpacity = useRef(new Animated.Value(0)).current;
   const scanIconProgress = useRef(new Animated.Value(0)).current;
+  const scanDotPulses = useRef([
+    new Animated.Value(0),
+    new Animated.Value(0),
+    new Animated.Value(0),
+  ]).current;
   const historyProgress = useRef(new Animated.Value(0)).current;
   const scanStateRef = useRef(scanState);
   const historyOpenRef = useRef(historyOpen);
+  const followupHintsRef = useRef<string | null>(null);
+  const result = outcome?.kind === 'valuation' ? outcome.result : null;
 
   useEffect(() => {
     if (permission && !permission.granted && permission.canAskAgain) requestPermission();
@@ -63,11 +67,28 @@ export default function App() {
   }, [scanIconProgress, scanState]);
 
   useEffect(() => {
+    if (scanState !== 'scanning') {
+      scanDotPulses.forEach((value) => value.setValue(0));
+      return;
+    }
+
+    const animation = Animated.loop(
+      Animated.stagger(135, scanDotPulses.map((value) => Animated.sequence([
+        Animated.timing(value, { toValue: 1, duration: 260, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+        Animated.timing(value, { toValue: 0, duration: 360, easing: Easing.inOut(Easing.cubic), useNativeDriver: true }),
+      ]))),
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [scanDotPulses, scanState]);
+
+  useEffect(() => {
     historyOpenRef.current = historyOpen;
   }, [historyOpen]);
 
   useEffect(() => {
     if (scanState === 'result') {
+      cameraRef.current?.resumePreview().catch(() => undefined);
       sheetDrag.setValue(0);
       Animated.spring(sheetProgress, {
         toValue: 1,
@@ -89,11 +110,21 @@ export default function App() {
     }
   }, [frozenPreviewOpacity, scanPreviewOpacity, scanState, sheetDrag, sheetProgress]);
 
-  const scanImage = async (uri: string) => {
-    if (scanStateRef.current !== 'ready') return;
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  const beginScan = () => {
+    if (scanStateRef.current !== 'ready') return false;
+    scanStateRef.current = 'scanning';
     setScanState('scanning');
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    return true;
+  };
+
+  const scanImage = async (uri: string, scanAlreadyStarted = false) => {
+    if (!scanAlreadyStarted && !beginScan()) return;
     const scanStartedAt = Date.now();
+    const remoteRequest = requestValuation(uri, followupHintsRef.current ?? undefined).then(
+      (value) => ({ value } as const),
+      (error: unknown) => ({ error } as const),
+    );
 
     try {
       setFrozenImageUri(uri);
@@ -118,14 +149,36 @@ export default function App() {
     }
 
     const remainingRevealTime = Math.max(0, 1450 - (Date.now() - scanStartedAt));
-    setTimeout(async () => {
-      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    const [remote] = await Promise.all([
+      remoteRequest,
+      new Promise<void>((resolve) => setTimeout(resolve, remainingRevealTime)),
+    ]);
+
+    if ('error' in remote) {
+      const message = remote.error instanceof ValuationApiError ? remote.error.message : 'The valuation service could not complete this scan.';
+      setOutcome({ kind: 'error', message });
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    } else {
+      setOutcome(remote.value);
+      if (remote.value.kind === 'followup') {
+        const identity = remote.value.detail.identification;
+        followupHintsRef.current = `Previous scan candidate: ${identity.brand} ${identity.model} ${identity.variant}. Missing details: ${identity.missingDetails.join(', ')}.`;
+      } else {
+        followupHintsRef.current = null;
+      }
+      await Haptics.notificationAsync(remote.value.kind === 'valuation'
+        ? Haptics.NotificationFeedbackType.Success
+        : Haptics.NotificationFeedbackType.Warning);
+    }
+
+    if ('value' in remote && remote.value.kind === 'valuation') {
+      const valuation = remote.value.result;
       setHistoryEntries((entries) => [
-        { id: `${Date.now()}`, name: 'iPhone 13 Pro', value: '$395–$435', detail: 'Estimated just now' },
+        { id: valuation.id, name: valuation.item.name, value: formatEstimate(valuation), detail: `${valuation.evidence.length} market links · just now` },
         ...entries,
       ]);
-      setScanState('result');
-    }, remainingRevealTime);
+    }
+    setScanState('result');
   };
 
   const startScan = async () => {
@@ -133,8 +186,30 @@ export default function App() {
       await requestPermission();
       return;
     }
-    const captured = await cameraRef.current?.takePictureAsync({ quality: 0.86, skipProcessing: false });
-    if (captured?.uri) scanImage(captured.uri);
+    if (!beginScan()) return;
+
+    try {
+      // With onPictureSaved, Expo resolves as soon as the frame is captured instead of
+      // waiting for disk processing. Freeze the native preview at that point, then begin
+      // analysis as soon as the saved file URI arrives.
+      const capture = cameraRef.current?.takePictureAsync({
+        quality: 0.86,
+        skipProcessing: false,
+        onPictureSaved: (captured) => {
+          if (captured.uri) void scanImage(captured.uri, true);
+        },
+      });
+      // iOS pauses only the preview-layer connection, not the photo output. Starting
+      // capture first and pausing immediately gives an instant visual freeze while the
+      // full-resolution frame continues processing in the background.
+      await cameraRef.current?.pausePreview();
+      await capture;
+    } catch {
+      scanStateRef.current = 'ready';
+      setScanState('ready');
+      cameraRef.current?.resumePreview().catch(() => undefined);
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    }
   };
 
   const choosePhoto = async () => {
@@ -145,7 +220,7 @@ export default function App() {
       mediaTypes: ['images'],
       quality: 0.86,
     });
-    if (!selection.canceled) scanImage(selection.assets[0].uri);
+    if (!selection.canceled) void scanImage(selection.assets[0].uri);
   };
 
   const toggleTorch = async () => {
@@ -195,12 +270,23 @@ export default function App() {
       setProcessedImageUri(null);
       frozenPreviewOpacity.setValue(0);
       scanPreviewOpacity.setValue(0);
+      setOutcome(null);
+      scanStateRef.current = 'ready';
       setScanState('ready');
     });
   };
 
   const dismissResult = () => {
     if (scanState === 'result') closeSheet(true);
+  };
+
+  const openEvidence = async (evidence: MarketEvidence) => {
+    await Haptics.selectionAsync();
+    try {
+      await Linking.openURL(evidence.url);
+    } catch {
+      Alert.alert('Couldn’t open this listing', 'The marketplace link may be temporarily unavailable.');
+    }
   };
 
   const sheetPanResponder = useRef(PanResponder.create({
@@ -229,6 +315,13 @@ export default function App() {
   const gemOpacity = scanIconProgress.interpolate({ inputRange: [0, 0.6, 1], outputRange: [1, 0.45, 0] });
   const dotsOpacity = scanIconProgress.interpolate({ inputRange: [0, 0.45, 1], outputRange: [0, 0.2, 1] });
   const dotsTranslateY = scanIconProgress.interpolate({ inputRange: [0, 1], outputRange: [8, 0] });
+  const dotStyles = scanDotPulses.map((pulse) => ({
+    opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.34, 1] }),
+    transform: [
+      { translateY: pulse.interpolate({ inputRange: [0, 1], outputRange: [1.5, -2.5] }) },
+      { scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.82, 1.22] }) },
+    ],
+  }));
   return (
     <SafeAreaProvider>
       <View style={styles.screen}>
@@ -248,17 +341,23 @@ export default function App() {
 
       <SafeAreaView style={styles.safeArea} {...historyPanResponder.panHandlers}>
         <View style={styles.captureDock}>
+          {scanState === 'scanning' && (
+            <View style={styles.scanStatusPill}>
+              <Text style={styles.scanStatusTitle}>Identifying item…</Text>
+              <Text style={styles.scanStatusCopy}>Checking visible details and market references</Text>
+            </View>
+          )}
           <Pressable style={[styles.utilityButton, styles.leftUtility]} onPress={choosePhoto}>
             <Ionicons name="images-outline" color="#F5F5F7" size={20} />
           </Pressable>
-          <Pressable onPress={startScan} disabled={scanState === 'scanning'} style={({ pressed }) => [styles.scanPressable, pressed && styles.scanPressed]}>
+          <Pressable onPressIn={startScan} onPress={startScan} disabled={scanState === 'scanning'} style={({ pressed }) => [styles.scanPressable, pressed && styles.scanPressed]}>
             <LinearGradient colors={['#3EAA5B', '#A3F39E']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.scanGradientBorder}>
               <View style={styles.scanCenter}>
                 <Animated.View style={[styles.gemIcon, { opacity: gemOpacity, transform: [{ scale: gemScale }, { rotate: gemRotate }] }]}>
                   <Image source={gemMark} style={styles.gemMarkImage} />
                 </Animated.View>
                 <Animated.View style={[styles.scanDots, { opacity: dotsOpacity, transform: [{ translateY: dotsTranslateY }] }]}>
-                  <View style={styles.scanDot} /><View style={styles.scanDot} /><View style={styles.scanDot} />
+                  {dotStyles.map((style, index) => <Animated.View key={index} style={[styles.scanDot, style]} />)}
                 </Animated.View>
               </View>
             </LinearGradient>
@@ -273,56 +372,29 @@ export default function App() {
         <Animated.View style={[styles.backdrop, { opacity: backdropOpacity }]} />
       </Pressable>
 
-      <Animated.View style={[styles.sheet, { transform: [{ translateY: sheetTranslation }, { scale: sheetScale }] }]} pointerEvents={scanState === 'result' ? 'auto' : 'none'}>
+      <Animated.View style={[styles.sheet, outcome?.kind === 'followup' && styles.followupSheet, outcome?.kind === 'error' && styles.errorSheet, { transform: [{ translateY: sheetTranslation }, { scale: sheetScale }] }]} pointerEvents={scanState === 'result' ? 'auto' : 'none'}>
         <View style={styles.sheetDragArea} {...sheetPanResponder.panHandlers}>
           <View style={styles.sheetHandle} />
           <View style={styles.sheetHeader}>
-            <View>
-              <Text style={styles.kicker}>EVALUATION</Text>
-              <Text style={styles.itemName}>iPhone 13 Pro</Text>
-              <Text style={styles.itemDetails}>256GB · Sierra Blue · Good condition</Text>
+            <View style={styles.sheetHeaderCopy}>
+              <Text style={styles.kicker}>{outcome?.kind === 'valuation' ? 'EVALUATION' : outcome?.kind === 'research' ? 'ITEM IDENTIFIED' : outcome?.kind === 'followup' ? 'DETAIL PHOTO' : 'SCAN INTERRUPTED'}</Text>
+              <Text style={styles.itemName}>{outcome?.kind === 'valuation' || outcome?.kind === 'research' ? outcome.result.item.name : outcome?.kind === 'followup' ? 'Add a closer photo' : 'Couldn’t send scan'}</Text>
+              <Text style={styles.itemDetails} numberOfLines={2}>
+                {outcome?.kind === 'valuation' || outcome?.kind === 'research'
+                  ? outcome.result.item.details
+                  : outcome?.kind === 'followup'
+                    ? outcome.detail.requestedPhoto
+                    : outcome?.kind === 'error' ? outcome.message : ''}
+              </Text>
             </View>
             <Pressable style={styles.closeButton} onPress={dismissResult}><Ionicons name="close" color="#F5F5F7" size={18} /></Pressable>
           </View>
         </View>
 
-        <View style={styles.valuation}>
-          <Text style={styles.kicker}>ESTIMATED RESALE VALUE</Text>
-          <GradientValue value="$395–$435" />
-          <View style={styles.confidenceRow}>
-            <Text style={styles.confidenceLabel}>Confidence score: </Text>
-            <Text style={[styles.confidenceValue, { color: confidenceColor(confidence) }]}>{confidence}%</Text>
-          </View>
-        </View>
-
-        <View style={styles.hairline} />
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Comparable listings</Text>
-          <Text style={styles.sectionCount}>3 FOUND</Text>
-        </View>
-        <Text style={styles.sectionDescription}>Illustrative preview data · live sources connect in the valuation backend.</Text>
-
-        <ScrollView style={styles.listScroll} contentContainerStyle={styles.listings} showsVerticalScrollIndicator={false}>
-            {listings.map((listing, index) => (
-              <Pressable key={listing.source} style={({ pressed }) => [styles.listingRow, pressed && styles.listingPressed]}>
-                <Image source={{ uri: listingImage }} style={styles.listingImage} />
-                <View style={styles.listingCopy}>
-                  <Text style={styles.listingSource}>{listing.source.toUpperCase()}</Text>
-                  <Text numberOfLines={1} style={styles.listingTitle}>{listing.title}</Text>
-                  <Text style={styles.listingDetail}>{listing.detail}</Text>
-                </View>
-                <Text style={styles.listingPrice}>{listing.price}</Text>
-                {index < listings.length - 1 && <View style={styles.listingDivider} />}
-              </Pressable>
-            ))}
-        </ScrollView>
-
-        <View style={styles.sheetFooter}>
-          <Pressable style={styles.saveButton} onPress={() => Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)}>
-            <Ionicons name="bookmark-outline" color="#F5F5F7" size={17} />
-            <Text style={styles.saveLabel}>SAVE TO COLLECTION</Text>
-          </Pressable>
-        </View>
+        {result && <ValuationContent result={result} onOpenEvidence={openEvidence} />}
+        {outcome?.kind === 'research' && <ResearchContent result={outcome.result} onOpenEvidence={openEvidence} />}
+        {outcome?.kind === 'followup' && <FollowupContent outcome={outcome} onContinue={() => closeSheet(true)} />}
+        {outcome?.kind === 'error' && <ErrorContent onRetry={() => closeSheet(true)} />}
       </Animated.View>
 
       <Animated.View
@@ -364,6 +436,178 @@ export default function App() {
   );
 }
 
+function ValuationContent({ result, onOpenEvidence }: { result: ValuationResult; onOpenEvidence: (evidence: MarketEvidence) => void }) {
+  const previewEvidence = result.disclosure?.toLowerCase().includes('preview') ?? false;
+  return (
+    <>
+      <View style={styles.valuation}>
+        <Text style={styles.kicker}>ESTIMATED RESALE VALUE</Text>
+        <GradientValue value={formatEstimate(result)} />
+        <View style={styles.confidenceRow}>
+          <Text style={styles.confidenceLabel}>Confidence score: </Text>
+          <Text style={[styles.confidenceValue, { color: confidenceColor(result.estimate.confidence) }]}>{result.estimate.confidence}%</Text>
+        </View>
+      </View>
+
+      <View style={styles.hairline} />
+      <View style={styles.sectionHeader}>
+        <View>
+          <Text style={styles.sectionTitle}>{previewEvidence ? 'Market references' : 'Market evidence'}</Text>
+          <Text style={[styles.proofLabel, previewEvidence && styles.previewLabel]}>
+            <Ionicons name={previewEvidence ? 'flask-outline' : 'shield-checkmark'} size={11} color={previewEvidence ? '#E4CF86' : '#8CE798'} />{' '}
+            {previewEvidence ? 'PREVIEW SEARCH LINKS' : 'PROOF LINKS INCLUDED'}
+          </Text>
+        </View>
+        <Text style={styles.sectionCount}>{result.evidence.length} FOUND</Text>
+      </View>
+      <Text style={styles.sectionDescription}>{result.disclosure}</Text>
+      <View style={styles.evidenceNote}>
+        <Ionicons name="information-circle-outline" color="#A7A7A7" size={15} />
+        <Text style={styles.evidenceNoteText}>
+          {previewEvidence
+            ? 'These are search references for product testing, not verified completed sales. Exact listing proof will replace them when providers are connected.'
+            : 'Sold results support the estimate. Active listings show what sellers are asking and are context only.'}
+        </Text>
+      </View>
+
+      <ScrollView style={styles.listScroll} contentContainerStyle={styles.listings} showsVerticalScrollIndicator={false}>
+        {result.evidence.map((listing, index) => (
+          <Pressable
+            accessibilityRole="link"
+            accessibilityLabel={`Open ${listing.source} reference for ${listing.title}`}
+            key={listing.id}
+            onPress={() => onOpenEvidence(listing)}
+            style={({ pressed }) => [styles.listingRow, pressed && styles.listingPressed]}
+          >
+            {listing.imageUrl ? (
+              <Image source={{ uri: listing.imageUrl }} style={styles.listingImage} />
+            ) : (
+              <View style={[styles.listingImage, styles.listingImageFallback]}><Ionicons name="link-outline" color="#777777" size={20} /></View>
+            )}
+            <View style={styles.listingCopy}>
+              <View style={styles.listingMeta}>
+                <Text style={styles.listingSource}>{listing.source.toUpperCase()}</Text>
+                <View style={[styles.evidenceBadge, listing.kind === 'sold' ? styles.soldBadge : styles.activeBadge]}>
+                  <Text style={[styles.evidenceBadgeText, listing.kind === 'sold' ? styles.soldBadgeText : styles.activeBadgeText]}>{listing.kind.toUpperCase()}</Text>
+                </View>
+                <Text style={styles.matchScore}>{listing.matchScore}% MATCH</Text>
+              </View>
+              <Text numberOfLines={1} style={styles.listingTitle}>{listing.title}</Text>
+              <Text numberOfLines={1} style={styles.listingDetail}>{listing.detail}</Text>
+            </View>
+            <View style={styles.listingAction}>
+              {typeof listing.price === 'number' && <Text style={styles.listingPrice}>{formatMoney(listing.price + (listing.shipping ?? 0))}</Text>}
+              <View style={styles.viewLink}><Text style={styles.viewLinkText}>VIEW</Text><Ionicons name="open-outline" color="#9DE7A2" size={12} /></View>
+            </View>
+            {index < result.evidence.length - 1 && <View style={styles.listingDivider} />}
+          </Pressable>
+        ))}
+      </ScrollView>
+
+      <View style={styles.sheetFooter}>
+        <Pressable style={styles.saveButton} onPress={() => Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)}>
+          <Ionicons name="bookmark-outline" color="#F5F5F7" size={17} />
+          <Text style={styles.saveLabel}>SAVE TO COLLECTION</Text>
+        </Pressable>
+      </View>
+    </>
+  );
+}
+
+function ResearchContent({ result, onOpenEvidence }: { result: ResearchResult; onOpenEvidence: (evidence: MarketEvidence) => void }) {
+  const estimate = result.estimate
+    ? `${formatMoney(result.estimate.low, result.estimate.currency)}–${formatMoney(result.estimate.high, result.estimate.currency)}`
+    : 'Not enough detail';
+  const hasLiveListings = result.evidence.some((listing) => typeof listing.price === 'number');
+  return (
+    <>
+      <View style={styles.valuation}>
+        <Text style={styles.kicker}>ESTIMATED RESALE VALUE</Text>
+        <GradientValue value={estimate} />
+        <View style={styles.preliminaryRow}>
+          <View style={styles.preliminaryDot} />
+          <Text style={styles.preliminaryLabel}>PRELIMINARY RANGE · VISUAL IDENTIFICATION</Text>
+        </View>
+      </View>
+      <View style={styles.hairline} />
+      <View style={styles.sectionHeader}>
+        <View>
+          <Text style={styles.sectionTitle}>Possible listings</Text>
+          <Text style={[styles.proofLabel, styles.previewLabel]}>
+            {hasLiveListings ? 'LIVE ASKING PRICES · NOT SOLD COMPS' : 'MARKETPLACE LINKS · NOT SOLD COMPS'}
+          </Text>
+        </View>
+        <Text style={styles.sectionCount}>{result.evidence.length} FOUND</Text>
+      </View>
+      <Text style={styles.sectionDescription}>Open a marketplace to compare similar items.</Text>
+      <ScrollView style={styles.listScroll} contentContainerStyle={styles.listings} showsVerticalScrollIndicator={false}>
+        {result.evidence.map((listing, index) => (
+          <Pressable
+            accessibilityRole="link"
+            accessibilityLabel={`Open ${listing.source} search for ${listing.title}`}
+            key={listing.id}
+            onPress={() => onOpenEvidence(listing)}
+            style={({ pressed }) => [styles.listingRow, pressed && styles.listingPressed]}
+          >
+            {listing.imageUrl ? (
+              <Image source={{ uri: listing.imageUrl }} style={styles.listingImage} />
+            ) : (
+              <View style={[styles.listingImage, styles.listingImageFallback]}><Ionicons name="search-outline" color="#777777" size={20} /></View>
+            )}
+            <View style={styles.listingCopy}>
+              <View style={styles.listingMeta}>
+                <Text style={styles.listingSource}>{listing.source.toUpperCase()}</Text>
+                <Text style={styles.matchScore}>{listing.matchScore}% ID MATCH</Text>
+              </View>
+              <Text numberOfLines={1} style={styles.listingTitle}>{listing.title}</Text>
+              <Text numberOfLines={1} style={styles.listingDetail}>{listing.detail}</Text>
+            </View>
+            <View style={styles.listingAction}>
+              {typeof listing.price === 'number' && <Text style={styles.listingPrice}>{formatMoney(listing.price + (listing.shipping ?? 0))}</Text>}
+              <View style={styles.viewLink}><Text style={styles.viewLinkText}>{typeof listing.price === 'number' ? 'VIEW' : 'SEARCH'}</Text><Ionicons name="open-outline" color="#9DE7A2" size={12} /></View>
+            </View>
+            {index < result.evidence.length - 1 && <View style={styles.listingDivider} />}
+          </Pressable>
+        ))}
+      </ScrollView>
+    </>
+  );
+}
+
+function FollowupContent({ onContinue }: { outcome: Extract<ScanOutcome, { kind: 'followup' }>; onContinue: () => void }) {
+  return (
+    <View style={styles.followupActions}>
+      <View style={styles.followupStatus}>
+        <Ionicons name="camera-outline" color="#929292" size={15} />
+        <Text style={styles.followupStatusText}>Your scan will continue from here</Text>
+      </View>
+      <View style={styles.followupFooter}>
+        <Pressable style={({ pressed }) => [styles.retryButton, pressed && styles.retryButtonPressed]} onPress={onContinue}>
+          <Ionicons name="camera-outline" color="#E1E1E1" size={17} />
+          <Text style={styles.retryButtonText}>BACK TO CAMERA</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function ErrorContent({ onRetry }: { onRetry: () => void }) {
+  return (
+    <View style={styles.errorActions}>
+      <View style={styles.errorStatus}>
+        <Ionicons name="shield-checkmark-outline" color="#929292" size={15} />
+        <Text style={styles.errorStatusText}>No estimate was saved</Text>
+      </View>
+      <View style={styles.errorFooter}>
+        <Pressable style={({ pressed }) => [styles.retryButton, pressed && styles.retryButtonPressed]} onPress={onRetry}>
+          <Ionicons name="refresh" color="#E1E1E1" size={17} />
+          <Text style={styles.retryButtonText}>TRY AGAIN</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
 function GradientValue({ value }: { value: string }) {
   return (
     <MaskedView style={styles.gradientValue} maskElement={<Text style={styles.valueMask}>{value}</Text>}>
@@ -382,6 +626,9 @@ const styles = StyleSheet.create({
   cameraShade: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.08)' },
   safeArea: { flex: 1, paddingHorizontal: 20, paddingBottom: 12 },
   captureDock: { marginTop: 'auto', position: 'relative', alignItems: 'center' },
+  scanStatusPill: { position: 'absolute', bottom: 94, minWidth: 238, alignItems: 'center', paddingHorizontal: 18, paddingVertical: 11, borderRadius: 18, backgroundColor: 'rgba(8,8,8,0.88)', borderWidth: 1, borderColor: '#343434' },
+  scanStatusTitle: { color: '#F5F5F7', fontSize: 13, fontWeight: '800' },
+  scanStatusCopy: { color: '#969696', marginTop: 3, fontSize: 10.5, fontWeight: '500' },
   utilityButton: { position: 'absolute', top: 23, width: 42, height: 42, borderRadius: 21, backgroundColor: '#0C0C0C', borderWidth: 1, borderColor: '#393939', alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 9, shadowOffset: { width: 0, height: 4 } },
   utilityButtonActive: { backgroundColor: '#1A2C1D', borderColor: '#78C980' },
   leftUtility: { left: '22%' }, rightUtility: { right: '22%' },
@@ -395,9 +642,12 @@ const styles = StyleSheet.create({
   scanDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: '#F5F5F7' },
   backdrop: { ...StyleSheet.absoluteFill, backgroundColor: '#000000' },
   sheet: { position: 'absolute', left: 0, right: 0, bottom: 0, height: '94%', overflow: 'hidden', backgroundColor: '#101010', borderTopLeftRadius: 26, borderTopRightRadius: 26, borderTopWidth: 1, borderLeftWidth: 1, borderRightWidth: 1, borderColor: '#3A3A3A', shadowColor: '#000', shadowOpacity: 0.6, shadowRadius: 28, shadowOffset: { width: 0, height: -10 } },
+  followupSheet: { height: 325 },
+  errorSheet: { height: 305 },
   sheetDragArea: { paddingHorizontal: 20 },
   sheetHandle: { alignSelf: 'center', marginTop: 10, width: 34, height: 4, borderRadius: 3, backgroundColor: '#555555' },
   sheetHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', paddingTop: 20 },
+  sheetHeaderCopy: { flex: 1, paddingRight: 16 },
   kicker: { color: '#A9ADA9', fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
   itemName: { color: '#FFFFFF', marginTop: 6, fontSize: 29, lineHeight: 33, fontWeight: '800', letterSpacing: -1.45 },
   itemDetails: { color: '#9A9A9A', marginTop: 3, fontSize: 14, fontWeight: '500' },
@@ -408,25 +658,55 @@ const styles = StyleSheet.create({
   confidenceRow: { flexDirection: 'row', alignItems: 'center', marginTop: 5 },
   confidenceLabel: { color: '#A1A1A1', fontSize: 14, fontWeight: '600' },
   confidenceValue: { fontSize: 14, fontWeight: '800' },
+  preliminaryRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 5 },
+  preliminaryDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: '#E4CF86' },
+  preliminaryLabel: { color: '#A7A7A7', fontSize: 8, fontWeight: '800', letterSpacing: 1 },
   hairline: { height: StyleSheet.hairlineWidth, backgroundColor: '#353535', marginHorizontal: 20, marginTop: 24 },
   sectionHeader: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', marginHorizontal: 20, marginTop: 22 },
   sectionTitle: { color: '#FFFFFF', fontSize: 19, fontWeight: '800', letterSpacing: -0.5 },
+  proofLabel: { color: '#8CE798', fontSize: 8, fontWeight: '800', letterSpacing: 1, marginTop: 4 },
+  previewLabel: { color: '#E4CF86' },
   sectionCount: { color: '#A7A7A7', fontSize: 9, fontWeight: '800', letterSpacing: 1.45 },
   sectionDescription: { color: '#858585', fontSize: 11, lineHeight: 15, marginHorizontal: 20, marginTop: 5 },
-  listScroll: { flex: 1, marginTop: 8 },
+  evidenceNote: { flexDirection: 'row', alignItems: 'flex-start', gap: 7, marginHorizontal: 20, marginTop: 10, padding: 10, borderRadius: 10, backgroundColor: '#171717', borderWidth: 1, borderColor: '#303030' },
+  evidenceNoteText: { flex: 1, color: '#A7A7A7', fontSize: 10.5, lineHeight: 14 },
+  listScroll: { flex: 1, marginTop: 5 },
   listings: { paddingHorizontal: 20, paddingBottom: 8 },
   listingRow: { minHeight: 83, paddingVertical: 10, flexDirection: 'row', alignItems: 'center' },
   listingPressed: { opacity: 0.65 },
   listingImage: { width: 55, height: 55, borderRadius: 11, borderWidth: 1, borderColor: '#454545', backgroundColor: '#1A1A1A' },
+  listingImageFallback: { alignItems: 'center', justifyContent: 'center' },
   listingCopy: { flex: 1, marginLeft: 12, marginRight: 8 },
+  listingMeta: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   listingSource: { color: '#A2DFA3', fontSize: 8, fontWeight: '800', letterSpacing: 1.2 },
+  evidenceBadge: { paddingHorizontal: 5, paddingVertical: 2, borderRadius: 4, borderWidth: 1 },
+  soldBadge: { backgroundColor: '#142519', borderColor: '#315A39' },
+  activeBadge: { backgroundColor: '#22201A', borderColor: '#5A5031' },
+  evidenceBadgeText: { fontSize: 7, fontWeight: '900', letterSpacing: 0.7 },
+  soldBadgeText: { color: '#8CE798' },
+  activeBadgeText: { color: '#E4CF86' },
+  matchScore: { color: '#777777', fontSize: 7, fontWeight: '800', letterSpacing: 0.5 },
   listingTitle: { color: '#F5F5F7', marginTop: 3, fontSize: 14, fontWeight: '700', letterSpacing: -0.3 },
   listingDetail: { color: '#8D8D8D', marginTop: 2, fontSize: 11.5, fontWeight: '500' },
+  listingAction: { alignItems: 'flex-end', gap: 5 },
   listingPrice: { color: '#FFFFFF', fontSize: 16, fontWeight: '800', letterSpacing: -0.5 },
+  viewLink: { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  viewLinkText: { color: '#9DE7A2', fontSize: 8, fontWeight: '900', letterSpacing: 0.8 },
   listingDivider: { position: 'absolute', left: 67, right: 0, bottom: 0, height: StyleSheet.hairlineWidth, backgroundColor: '#333333' },
   sheetFooter: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 20, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#2D2D2D', backgroundColor: '#101010' },
   saveButton: { height: 49, borderRadius: 14, borderWidth: 1, borderColor: '#505050', backgroundColor: '#0B0B0B', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8, shadowColor: '#000', shadowOpacity: 0.38, shadowRadius: 9, shadowOffset: { width: 0, height: 5 } },
   saveLabel: { color: '#FFFFFF', fontSize: 10, fontWeight: '800', letterSpacing: 1.2 },
+  followupActions: { flex: 1, justifyContent: 'flex-end' },
+  followupStatus: { flexDirection: 'row', alignItems: 'center', gap: 7, marginHorizontal: 20, marginBottom: 15 },
+  followupStatusText: { color: '#929292', fontSize: 11.5, fontWeight: '600' },
+  followupFooter: { paddingHorizontal: 20, paddingTop: 14, paddingBottom: 20, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#2D2D2D' },
+  errorActions: { flex: 1, justifyContent: 'flex-end' },
+  errorStatus: { flexDirection: 'row', alignItems: 'center', gap: 7, marginHorizontal: 20, marginBottom: 15 },
+  errorStatusText: { color: '#929292', fontSize: 11.5, fontWeight: '600' },
+  errorFooter: { paddingHorizontal: 20, paddingTop: 14, paddingBottom: 20, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#2D2D2D' },
+  retryButton: { height: 51, borderRadius: 15, borderWidth: 1, borderColor: '#606060', backgroundColor: '#242424', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 },
+  retryButtonPressed: { backgroundColor: '#303030', opacity: 0.88 },
+  retryButtonText: { color: '#E8E8E8', fontSize: 10.5, fontWeight: '900', letterSpacing: 1.1 },
   historyPage: { ...StyleSheet.absoluteFill, backgroundColor: '#090909' },
   historySafeArea: { flex: 1, paddingHorizontal: 20 },
   historyHeader: { height: 62, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },

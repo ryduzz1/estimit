@@ -2,6 +2,20 @@
 
 Estimit is a TypeScript app built with Expo and React Native.
 
+## Backend connection
+
+Build profiles send scans to `https://server.tailc264d2.ts.net:8443`. Development uses private Tailscale Serve; production-beta uses Tailscale Funnel on the same port so the app works from any internet connection. The app registers a revocable per-install credential and stores it in iOS Keychain with Expo SecureStore. Provider keys never ship in the app.
+
+Override the endpoint for another environment before starting Expo:
+
+```sh
+EXPO_PUBLIC_ESTIMIT_API_URL=https://api.example.com npm start
+```
+
+The app handles four server outcomes: an evidence-backed valuation, identified-item research links without an invented price, a targeted request for another photo, or a recoverable connection/service error. A follow-up photo includes the previous identification candidate as a hint.
+
+Release profiles are defined in `eas.json`. Before a broad App Store release, replace the production endpoint with a custom API domain and add Apple App Attest to the installation-registration flow.
+
 ## iOS development with Xcode
 
 This is an Expo + React Native app. Xcode runs the native iOS app, while Expo provides the JavaScript development server and configuration.

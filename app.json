@@ -8,9 +8,11 @@
     "userInterfaceStyle": "dark",
     "ios": {
       "bundleIdentifier": "com.ryduzz.estimit.estimit",
+      "buildNumber": "1",
       "infoPlist": {
         "NSCameraUsageDescription": "Estimit uses your camera to identify items and estimate their value.",
-        "NSPhotoLibraryUsageDescription": "Estimit lets you select photos of items to estimate their value."
+        "NSPhotoLibraryUsageDescription": "Estimit lets you select photos of items to estimate their value.",
+        "ITSAppUsesNonExemptEncryption": false
       },
       "supportsTablet": true
     },
@@ -32,7 +34,8 @@
             "deploymentTarget": "18.0"
           }
         }
-      ]
+      ],
+      "expo-secure-store"
     ],
     "web": {
       "favicon": "./assets/favicon.png"
