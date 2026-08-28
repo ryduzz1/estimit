@@ -1,11 +1,8 @@
 import type { Identification, MarketEvidence } from './domain.js';
-import { findEbayListings } from './ebay.js';
+import { buildEbaySearchQuery, findEbayListings } from './ebay.js';
 
 export async function findEvidence(identity: Identification): Promise<MarketEvidence[]> {
-  const known = (value: string) => !['unknown', 'unidentified', 'n/a', 'none'].includes(value.trim().toLowerCase());
-  const searchTerms = [identity.brand, identity.model, identity.variant].filter((value) => value && known(value));
-  if (searchTerms.length === 0) searchTerms.push(identity.category);
-  const label = searchTerms.join(' ').trim();
+  const label = buildEbaySearchQuery(identity);
   const query = encodeURIComponent(label);
   const observedAt = new Date().toISOString();
 

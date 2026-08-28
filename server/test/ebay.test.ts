@@ -1,6 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mapEbayItems } from '../src/ebay.js';
+import { buildEbaySearchQuery, mapEbayItems } from '../src/ebay.js';
+import type { Identification } from '../src/domain.js';
+
+const identity: Identification = {
+  category: 'smartphone', brand: 'Apple', model: 'iPhone 13 Pro', variant: 'Sierra Blue',
+  itemForm: 'single_item', quantity: 1,
+  attributes: [{ name: 'storage', value: '256GB' }, { name: 'color', value: 'Sierra Blue' }],
+  condition: 'good', conditionNotes: [], identifiers: [], identificationConfidence: 0.93,
+  visualEstimateLow: 350, visualEstimateHigh: 450, missingDetails: [], requestedPhoto: null,
+};
+
+test('builds category-aware searches with pricing-relevant attributes', () => {
+  assert.equal(buildEbaySearchQuery(identity), 'Apple iPhone 13 Pro Sierra Blue 256GB');
+  assert.match(buildEbaySearchQuery({ ...identity, itemForm: 'bundle', quantity: 3 }), /lot of 3$/);
+});
 
 test('normalizes real eBay item summaries into active listing evidence', () => {
   const [listing] = mapEbayItems({

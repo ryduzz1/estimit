@@ -45,6 +45,43 @@ function matchScore(query: string, title: string) {
   return Math.round(60 + 38 * matched / tokens.size);
 }
 
+const categoryAttributePriority: Array<[RegExp, string[]]> = [
+  [/phone|tablet|computer|laptop|electronic/, ['storage', 'capacity', 'model number', 'carrier', 'connectivity']],
+  [/camera|lens/, ['mount', 'focal length', 'model number']],
+  [/card|trading/, ['set', 'card number', 'year', 'player', 'character', 'variant']],
+  [/shoe|sneaker|clothing|apparel/, ['style code', 'sku', 'size', 'gender']],
+  [/game|console/, ['platform', 'edition', 'region']],
+  [/tool/, ['model number', 'voltage', 'battery platform']],
+];
+
+export function buildEbaySearchQuery(identity: Identification) {
+  const known = (value: string) => value && !['unknown', 'unidentified', 'n/a', 'none'].includes(value.trim().toLowerCase());
+  const category = identity.category.toLowerCase();
+  const priorities = categoryAttributePriority.find(([pattern]) => pattern.test(category))?.[1] ?? [];
+  const attributes = new Map(identity.attributes.map((attribute) => [attribute.name.trim().toLowerCase(), attribute.value.trim()]));
+  const terms = [identity.brand, identity.model, identity.variant].filter(known);
+  for (const name of priorities) {
+    const value = attributes.get(name);
+    if (value && known(value)) terms.push(value);
+  }
+  for (const identifier of identity.identifiers.slice(0, 2)) if (known(identifier)) terms.push(identifier);
+  if (terms.length === 0) terms.push(identity.category);
+  if (identity.itemForm === 'bundle' && identity.quantity > 1) terms.push(`lot of ${identity.quantity}`);
+
+  const seen = new Set<string>();
+  return terms
+    .flatMap((term) => term.split(/\s*·\s*/))
+    .map((term) => term.trim())
+    .filter((term) => {
+      const key = term.toLowerCase();
+      if (!term || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join(' ')
+    .slice(0, 180);
+}
+
 export function mapEbayItems(payload: EbaySearchPayload, query: string, observedAt = new Date().toISOString()): MarketEvidence[] {
   return (payload.itemSummaries ?? []).flatMap((item, index) => {
     const title = text(item.title);
@@ -98,9 +135,7 @@ async function applicationToken() {
 export async function findEbayListings(identity: Identification): Promise<MarketEvidence[]> {
   const token = await applicationToken();
   if (!token) return [];
-  const known = (value: string) => !['unknown', 'unidentified', 'n/a', 'none'].includes(value.trim().toLowerCase());
-  const terms = [identity.brand, identity.model, identity.variant].filter((value) => value && known(value));
-  const query = terms.join(' ').trim() || identity.category;
+  const query = buildEbaySearchQuery(identity);
   const url = new URL('https://api.ebay.com/buy/browse/v1/item_summary/search');
   url.searchParams.set('q', query);
   url.searchParams.set('limit', '5');

@@ -7,14 +7,24 @@ import MaskedView from '@react-native-masked-view/masked-view';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Animated, Easing, Image, Linking, PanResponder, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Alert, Animated, Easing, Image, Linking, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import EstimitVision from './modules/estim-vision/src/EstimitVisionModule';
-import { requestValuation, ScanOutcome, ValuationApiError } from './src/api';
-import { formatEstimate, formatMoney, MarketEvidence, ResearchResult, ValuationResult } from './src/valuation';
+import { refineIdentity, requestValuation, ScanOutcome, ValuationApiError } from './src/api';
+import { formatEstimate, formatMoney, Identification, MarketEvidence, ResearchResult, ValuationResult } from './src/valuation';
 
 type ScanState = 'ready' | 'scanning' | 'result';
 type HistoryEntry = { id: string; name: string; value: string; detail: string };
 type SheetOutcome = ScanOutcome | { kind: 'error'; message: string };
+type IdentityDraft = Pick<Identification, 'brand' | 'model' | 'variant' | 'category' | 'itemForm' | 'condition'> & { quantity: string };
+
+const itemFormOptions: Array<{ value: Identification['itemForm']; label: string }> = [
+  { value: 'single_item', label: 'ITEM' },
+  { value: 'bundle', label: 'BUNDLE' },
+  { value: 'accessory', label: 'ACCESSORY' },
+  { value: 'replacement_part', label: 'PART' },
+  { value: 'packaging', label: 'BOX' },
+];
+const conditionOptions: Identification['condition'][] = ['poor', 'fair', 'good', 'excellent', 'unknown'];
 
 const gemMark = require('./assets/estimit-gem-mark.png');
 
@@ -34,6 +44,10 @@ export default function App() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
   const [outcome, setOutcome] = useState<SheetOutcome | null>(null);
+  const [identityConfirmed, setIdentityConfirmed] = useState(false);
+  const [editingIdentity, setEditingIdentity] = useState(false);
+  const [refiningIdentity, setRefiningIdentity] = useState(false);
+  const [identityDraft, setIdentityDraft] = useState<IdentityDraft | null>(null);
   const { width } = useWindowDimensions();
   const cameraRef = useRef<CameraView>(null);
   const sheetProgress = useRef(new Animated.Value(0)).current;
@@ -51,6 +65,7 @@ export default function App() {
   const historyOpenRef = useRef(historyOpen);
   const followupHintsRef = useRef<string | null>(null);
   const result = outcome?.kind === 'valuation' ? outcome.result : null;
+  const identifiedResult = outcome?.kind === 'valuation' || outcome?.kind === 'research' ? outcome.result : null;
 
   useEffect(() => {
     if (permission && !permission.granted && permission.canAskAgain) requestPermission();
@@ -160,6 +175,8 @@ export default function App() {
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } else {
       setOutcome(remote.value);
+      setIdentityConfirmed(false);
+      setEditingIdentity(false);
       if (remote.value.kind === 'followup') {
         const identity = remote.value.detail.identification;
         followupHintsRef.current = `Previous scan candidate: ${identity.brand} ${identity.model} ${identity.variant}. Missing details: ${identity.missingDetails.join(', ')}.`;
@@ -271,6 +288,9 @@ export default function App() {
       frozenPreviewOpacity.setValue(0);
       scanPreviewOpacity.setValue(0);
       setOutcome(null);
+      setIdentityConfirmed(false);
+      setEditingIdentity(false);
+      setIdentityDraft(null);
       scanStateRef.current = 'ready';
       setScanState('ready');
     });
@@ -278,6 +298,63 @@ export default function App() {
 
   const dismissResult = () => {
     if (scanState === 'result') closeSheet(true);
+  };
+
+  const confirmIdentity = async () => {
+    setIdentityConfirmed(true);
+    setEditingIdentity(false);
+    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  };
+
+  const editIdentity = () => {
+    if (!identifiedResult) return;
+    const identity = identifiedResult.identification;
+    setIdentityDraft({
+      brand: identity.brand,
+      model: identity.model,
+      variant: identity.variant,
+      category: identity.category,
+      itemForm: identity.itemForm,
+      condition: identity.condition,
+      quantity: String(identity.quantity),
+    });
+    setEditingIdentity(true);
+    Haptics.selectionAsync();
+  };
+
+  const applyIdentity = async () => {
+    if (!identifiedResult || !identityDraft || refiningIdentity) return;
+    const brand = identityDraft.brand.trim();
+    const model = identityDraft.model.trim();
+    const category = identityDraft.category.trim();
+    if (!brand || !model || !category) {
+      Alert.alert('Add the item details', 'Brand, model, and item type are needed to search accurately.');
+      return;
+    }
+    setRefiningIdentity(true);
+    try {
+      const quantity = Math.max(1, Math.min(100, Number.parseInt(identityDraft.quantity, 10) || 1));
+      const revised = await refineIdentity({
+        ...identifiedResult.identification,
+        ...identityDraft,
+        brand,
+        model,
+        category,
+        variant: identityDraft.variant.trim(),
+        quantity,
+        attributes: [],
+        identifiers: [],
+      });
+      setOutcome(revised);
+      setIdentityConfirmed(true);
+      setEditingIdentity(false);
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (error) {
+      Alert.alert('Couldn’t update the match', error instanceof Error ? error.message : 'Please try again.');
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    } finally {
+      setRefiningIdentity(false);
+    }
   };
 
   const openEvidence = async (evidence: MarketEvidence) => {
@@ -391,7 +468,21 @@ export default function App() {
           </View>
         </View>
 
-        {result && <ValuationContent result={result} onOpenEvidence={openEvidence} />}
+        {identifiedResult && (
+          <IdentityCheck
+            identity={identifiedResult.identification}
+            confirmed={identityConfirmed}
+            editing={editingIdentity}
+            loading={refiningIdentity}
+            draft={identityDraft}
+            onConfirm={confirmIdentity}
+            onEdit={editIdentity}
+            onCancel={() => setEditingIdentity(false)}
+            onChange={setIdentityDraft}
+            onApply={applyIdentity}
+          />
+        )}
+        {result && <ValuationContent result={result} identityConfirmed={identityConfirmed} onOpenEvidence={openEvidence} />}
         {outcome?.kind === 'research' && <ResearchContent result={outcome.result} onOpenEvidence={openEvidence} />}
         {outcome?.kind === 'followup' && <FollowupContent outcome={outcome} onContinue={() => closeSheet(true)} />}
         {outcome?.kind === 'error' && <ErrorContent onRetry={() => closeSheet(true)} />}
@@ -436,7 +527,94 @@ export default function App() {
   );
 }
 
-function ValuationContent({ result, onOpenEvidence }: { result: ValuationResult; onOpenEvidence: (evidence: MarketEvidence) => void }) {
+function IdentityCheck({
+  identity,
+  confirmed,
+  editing,
+  loading,
+  draft,
+  onConfirm,
+  onEdit,
+  onCancel,
+  onChange,
+  onApply,
+}: {
+  identity: Identification;
+  confirmed: boolean;
+  editing: boolean;
+  loading: boolean;
+  draft: IdentityDraft | null;
+  onConfirm: () => void;
+  onEdit: () => void;
+  onCancel: () => void;
+  onChange: (draft: IdentityDraft) => void;
+  onApply: () => void;
+}) {
+  if (editing && draft) {
+    return (
+      <View style={styles.identityEditor}>
+        <View style={styles.identityEditorHeader}>
+          <Text style={styles.identityTitle}>Correct the match</Text>
+          <Pressable onPress={onCancel} hitSlop={10}><Text style={styles.identityTextAction}>CANCEL</Text></Pressable>
+        </View>
+        <View style={styles.identityFieldRow}>
+          <View style={styles.identityFieldHalf}>
+            <Text style={styles.identityFieldLabel}>BRAND</Text>
+            <TextInput value={draft.brand} onChangeText={(brand) => onChange({ ...draft, brand })} placeholder="Brand" placeholderTextColor="#666" style={styles.identityInput} autoCapitalize="words" />
+          </View>
+          <View style={styles.identityFieldHalf}>
+            <Text style={styles.identityFieldLabel}>ITEM TYPE</Text>
+            <TextInput value={draft.category} onChangeText={(category) => onChange({ ...draft, category })} placeholder="e.g. gaming mouse" placeholderTextColor="#666" style={styles.identityInput} autoCapitalize="none" />
+          </View>
+        </View>
+        <Text style={styles.identityFieldLabel}>MODEL</Text>
+        <TextInput value={draft.model} onChangeText={(model) => onChange({ ...draft, model })} placeholder="Exact model" placeholderTextColor="#666" style={styles.identityInput} autoCapitalize="words" />
+        <Text style={styles.identityFieldLabel}>VERSION / SIZE / STORAGE</Text>
+        <TextInput value={draft.variant} onChangeText={(variant) => onChange({ ...draft, variant })} placeholder="Optional" placeholderTextColor="#666" style={styles.identityInput} autoCapitalize="words" />
+        <View style={styles.identityChoiceRow}>
+          {itemFormOptions.map((option) => (
+            <Pressable key={option.value} onPress={() => onChange({ ...draft, itemForm: option.value })} style={[styles.identityChip, draft.itemForm === option.value && styles.identityChipSelected]}>
+              <Text style={[styles.identityChipText, draft.itemForm === option.value && styles.identityChipTextSelected]}>{option.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <View style={styles.identityChoiceRow}>
+          {conditionOptions.map((condition) => (
+            <Pressable key={condition} onPress={() => onChange({ ...draft, condition })} style={[styles.identityChip, draft.condition === condition && styles.identityChipSelected]}>
+              <Text style={[styles.identityChipText, draft.condition === condition && styles.identityChipTextSelected]}>{condition.toUpperCase()}</Text>
+            </Pressable>
+          ))}
+        </View>
+        {draft.itemForm === 'bundle' && (
+          <View style={styles.quantityRow}>
+            <Text style={styles.identityFieldLabel}>NUMBER OF ITEMS</Text>
+            <TextInput value={draft.quantity} onChangeText={(quantity) => onChange({ ...draft, quantity })} keyboardType="number-pad" maxLength={3} style={[styles.identityInput, styles.quantityInput]} />
+          </View>
+        )}
+        <Pressable disabled={loading} onPress={onApply} style={({ pressed }) => [styles.identityApply, (pressed || loading) && styles.identityApplyPressed]}>
+          <Text style={styles.identityApplyText}>{loading ? 'UPDATING LISTINGS…' : 'UPDATE MATCH'}</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  const formLabel = identity.itemForm === 'single_item' ? 'single item' : identity.itemForm.replace('_', ' ');
+  return (
+    <View style={[styles.identityCheck, confirmed && styles.identityCheckConfirmed]}>
+      <View style={styles.identityCheckCopy}>
+        <View style={styles.identityCheckLabelRow}>
+          <Ionicons name={confirmed ? 'checkmark-circle' : 'scan-outline'} color={confirmed ? '#8CE798' : '#C4C4C4'} size={14} />
+          <Text style={[styles.identityCheckLabel, confirmed && styles.identityCheckLabelConfirmed]}>{confirmed ? 'MATCH CONFIRMED' : 'CHECK THE MATCH'}</Text>
+        </View>
+        <Text numberOfLines={1} style={styles.identityCheckDetail}>{formLabel}{identity.quantity > 1 ? ` · ${identity.quantity} items` : ''} · {Math.round(identity.identificationConfidence * 100)}% visual confidence</Text>
+      </View>
+      {!confirmed && <Pressable onPress={onConfirm} style={styles.identityConfirmButton}><Text style={styles.identityConfirmText}>YES</Text></Pressable>}
+      <Pressable onPress={onEdit} style={styles.identityEditButton}><Text style={styles.identityEditText}>EDIT</Text></Pressable>
+    </View>
+  );
+}
+
+function ValuationContent({ result, identityConfirmed, onOpenEvidence }: { result: ValuationResult; identityConfirmed: boolean; onOpenEvidence: (evidence: MarketEvidence) => void }) {
   const previewEvidence = result.disclosure?.toLowerCase().includes('preview') ?? false;
   return (
     <>
@@ -505,9 +683,9 @@ function ValuationContent({ result, onOpenEvidence }: { result: ValuationResult;
       </ScrollView>
 
       <View style={styles.sheetFooter}>
-        <Pressable style={styles.saveButton} onPress={() => Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)}>
-          <Ionicons name="bookmark-outline" color="#F5F5F7" size={17} />
-          <Text style={styles.saveLabel}>SAVE TO COLLECTION</Text>
+        <Pressable disabled={!identityConfirmed} style={[styles.saveButton, !identityConfirmed && styles.saveButtonDisabled]} onPress={() => Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)}>
+          <Ionicons name={identityConfirmed ? 'bookmark-outline' : 'lock-closed-outline'} color={identityConfirmed ? '#F5F5F7' : '#777777'} size={17} />
+          <Text style={[styles.saveLabel, !identityConfirmed && styles.saveLabelDisabled]}>{identityConfirmed ? 'SAVE TO COLLECTION' : 'CONFIRM MATCH TO SAVE'}</Text>
         </Pressable>
       </View>
     </>
@@ -652,6 +830,35 @@ const styles = StyleSheet.create({
   itemName: { color: '#FFFFFF', marginTop: 6, fontSize: 29, lineHeight: 33, fontWeight: '800', letterSpacing: -1.45 },
   itemDetails: { color: '#9A9A9A', marginTop: 3, fontSize: 14, fontWeight: '500' },
   closeButton: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: '#181818', borderWidth: 1, borderColor: '#363636' },
+  identityCheck: { marginHorizontal: 20, marginTop: 15, minHeight: 54, paddingLeft: 13, paddingRight: 8, borderRadius: 13, borderWidth: 1, borderColor: '#3A3A3A', backgroundColor: '#171717', flexDirection: 'row', alignItems: 'center' },
+  identityCheckConfirmed: { borderColor: '#315A39', backgroundColor: '#111B13' },
+  identityCheckCopy: { flex: 1, paddingVertical: 9 },
+  identityCheckLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  identityCheckLabel: { color: '#D2D2D2', fontSize: 8, fontWeight: '900', letterSpacing: 1.15 },
+  identityCheckLabelConfirmed: { color: '#8CE798' },
+  identityCheckDetail: { color: '#7F7F7F', marginTop: 4, fontSize: 9.5, fontWeight: '600' },
+  identityConfirmButton: { height: 34, minWidth: 48, paddingHorizontal: 12, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: '#E8E8E8' },
+  identityConfirmText: { color: '#111111', fontSize: 9, fontWeight: '900', letterSpacing: 1 },
+  identityEditButton: { height: 34, minWidth: 50, alignItems: 'center', justifyContent: 'center' },
+  identityEditText: { color: '#A7A7A7', fontSize: 8.5, fontWeight: '900', letterSpacing: 1 },
+  identityEditor: { marginHorizontal: 20, marginTop: 15, padding: 13, borderRadius: 15, borderWidth: 1, borderColor: '#424242', backgroundColor: '#151515' },
+  identityEditorHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 11 },
+  identityTitle: { color: '#F5F5F7', fontSize: 15, fontWeight: '800', letterSpacing: -0.25 },
+  identityTextAction: { color: '#929292', fontSize: 8, fontWeight: '900', letterSpacing: 1 },
+  identityFieldRow: { flexDirection: 'row', gap: 8 },
+  identityFieldHalf: { flex: 1 },
+  identityFieldLabel: { color: '#858585', marginTop: 7, marginBottom: 4, fontSize: 7.5, fontWeight: '900', letterSpacing: 1 },
+  identityInput: { height: 36, paddingHorizontal: 10, borderRadius: 9, borderWidth: 1, borderColor: '#393939', backgroundColor: '#0D0D0D', color: '#F5F5F7', fontSize: 12.5, fontWeight: '600' },
+  identityChoiceRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 5, marginTop: 9 },
+  identityChip: { height: 25, paddingHorizontal: 8, borderRadius: 7, borderWidth: 1, borderColor: '#393939', backgroundColor: '#101010', alignItems: 'center', justifyContent: 'center' },
+  identityChipSelected: { borderColor: '#5F9F68', backgroundColor: '#17271A' },
+  identityChipText: { color: '#858585', fontSize: 7, fontWeight: '900', letterSpacing: 0.6 },
+  identityChipTextSelected: { color: '#9DE7A2' },
+  quantityRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 5 },
+  quantityInput: { width: 62, textAlign: 'center' },
+  identityApply: { height: 39, marginTop: 12, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: '#E6E6E6' },
+  identityApplyPressed: { opacity: 0.66 },
+  identityApplyText: { color: '#111111', fontSize: 9, fontWeight: '900', letterSpacing: 1 },
   valuation: { paddingHorizontal: 20, paddingTop: 27 },
   gradientValue: { marginTop: 6, height: 58, alignSelf: 'stretch' },
   valueMask: { color: '#FFFFFF', fontSize: 43, lineHeight: 53, fontWeight: '800', letterSpacing: -2.1 },
@@ -695,7 +902,9 @@ const styles = StyleSheet.create({
   listingDivider: { position: 'absolute', left: 67, right: 0, bottom: 0, height: StyleSheet.hairlineWidth, backgroundColor: '#333333' },
   sheetFooter: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 20, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#2D2D2D', backgroundColor: '#101010' },
   saveButton: { height: 49, borderRadius: 14, borderWidth: 1, borderColor: '#505050', backgroundColor: '#0B0B0B', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8, shadowColor: '#000', shadowOpacity: 0.38, shadowRadius: 9, shadowOffset: { width: 0, height: 5 } },
+  saveButtonDisabled: { borderColor: '#333333', backgroundColor: '#161616', shadowOpacity: 0 },
   saveLabel: { color: '#FFFFFF', fontSize: 10, fontWeight: '800', letterSpacing: 1.2 },
+  saveLabelDisabled: { color: '#777777' },
   followupActions: { flex: 1, justifyContent: 'flex-end' },
   followupStatus: { flexDirection: 'row', alignItems: 'center', gap: 7, marginHorizontal: 20, marginBottom: 15 },
   followupStatusText: { color: '#929292', fontSize: 11.5, fontWeight: '600' },

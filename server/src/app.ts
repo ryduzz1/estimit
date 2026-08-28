@@ -4,8 +4,9 @@ import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { config } from './config.js';
 import { authenticateInstallation, createInstallation, databaseIsReady, getValuation, saveValuation } from './database.js';
+import { identificationSchema, type Identification, type ResearchResult, type ValuationResult } from './domain.js';
 import { findEvidence } from './evidence.js';
-import { hasUsableSearchIdentity, identifyItem } from './identify.js';
+import { hasUsableSearchIdentity, identifyItem, targetedPhotoRequest } from './identify.js';
 import { calculateValuation } from './pricing.js';
 
 const allowedImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
@@ -33,6 +34,43 @@ function imageMatchesMime(image: Buffer, mimeType: string) {
   if (mimeType === 'image/webp') return image.subarray(0, 4).toString('ascii') === 'RIFF' && image.subarray(8, 12).toString('ascii') === 'WEBP';
   if (mimeType === 'image/heic' || mimeType === 'image/heif') return image.subarray(4, 8).toString('ascii') === 'ftyp';
   return false;
+}
+
+function itemFromIdentity(identity: Identification) {
+  const known = (value: string) => !['unknown', 'unidentified', 'n/a', 'none'].includes(value.trim().toLowerCase());
+  const name = [identity.brand, identity.model].filter(known).join(' ').trim() || identity.category;
+  const form = identity.itemForm === 'single_item' || identity.itemForm === 'unknown'
+    ? ''
+    : identity.itemForm.replace('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+  const details = [
+    identity.variant,
+    form,
+    identity.quantity > 1 ? `${identity.quantity} items` : '',
+    identity.condition !== 'unknown' ? `${identity.condition[0]!.toUpperCase()}${identity.condition.slice(1)} condition` : '',
+  ].filter((value) => value && known(value)).join(' · ');
+  return { name, details };
+}
+
+async function evaluateIdentity(id: string, identity: Identification): Promise<ResearchResult | ValuationResult> {
+  const evidence = await findEvidence(identity);
+  const soldEvidence = evidence.filter((entry) => entry.kind === 'sold' && typeof entry.price === 'number');
+  if (soldEvidence.length > 0) return calculateValuation(id, identity, evidence);
+  const hasVisualEstimate = identity.visualEstimateLow !== null && identity.visualEstimateHigh !== null;
+  return {
+    status: 'research_only',
+    id,
+    item: itemFromIdentity(identity),
+    identification: identity,
+    estimate: hasVisualEstimate ? {
+      low: Math.round(Math.min(identity.visualEstimateLow!, identity.visualEstimateHigh!)),
+      high: Math.round(Math.max(identity.visualEstimateLow!, identity.visualEstimateHigh!)),
+      currency: 'USD',
+      confidence: Math.min(55, Math.round(identity.identificationConfidence * 60)),
+      basis: 'visual',
+    } : null,
+    evidence,
+    disclosure: 'Preliminary visual range. Marketplace links are provided for comparison; verified sold-price data is not connected yet.',
+  };
 }
 
 export function buildApp() {
@@ -120,40 +158,29 @@ export function buildApp() {
       return reply.code(422).send({
         error: 'insufficient_identification',
         identification: identity,
-        requestedPhoto: identity.requestedPhoto ?? 'Take a clear photo showing the complete item and any brand, model, barcode, or label.',
+        requestedPhoto: targetedPhotoRequest(identity),
       });
     }
-    const evidence = await findEvidence(identity);
-    const soldEvidence = evidence.filter((entry) => entry.kind === 'sold' && typeof entry.price === 'number');
-    if (soldEvidence.length === 0) {
-      const known = (value: string) => !['unknown', 'unidentified', 'n/a', 'none'].includes(value.trim().toLowerCase());
-      const name = [identity.brand, identity.model].filter(known).join(' ').trim() || identity.category;
-      const details = [identity.variant, identity.condition !== 'unknown' ? `${identity.condition[0]!.toUpperCase()}${identity.condition.slice(1)} condition` : '']
-        .filter((value) => value && known(value))
-        .join(' · ');
-      const hasVisualEstimate = identity.visualEstimateLow !== null && identity.visualEstimateHigh !== null;
-      const estimate = hasVisualEstimate ? {
-        low: Math.round(Math.min(identity.visualEstimateLow!, identity.visualEstimateHigh!)),
-        high: Math.round(Math.max(identity.visualEstimateLow!, identity.visualEstimateHigh!)),
-        currency: 'USD' as const,
-        confidence: Math.min(55, Math.round(identity.identificationConfidence * 60)),
-        basis: 'visual' as const,
-      } : null;
-      return reply.code(200).send({
-        status: 'research_only',
-        id,
-        item: {
-          name,
-          details,
-        },
-        estimate,
-        evidence,
-        disclosure: 'Preliminary visual range. Marketplace links are provided for comparison; verified sold-price data is not connected yet.',
-      });
-    }
-    const result = calculateValuation(id, identity, evidence);
-    await saveValuation(imageSha256, identity, result, installationId);
-    return reply.code(201).send(result);
+    const result = await evaluateIdentity(id, identity);
+    if (!('status' in result)) await saveValuation(imageSha256, identity, result, installationId);
+    return reply.code('status' in result ? 200 : 201).send(result);
+  });
+
+  app.post<{ Body: { identification?: unknown } }>('/v1/valuations/refine', {
+    config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const parsed = identificationSchema.safeParse(request.body?.identification);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid_identification' });
+    const identity: Identification = {
+      ...parsed.data,
+      identificationConfidence: 1,
+      visualEstimateLow: null,
+      visualEstimateHigh: null,
+      requestedPhoto: null,
+    };
+    if (!hasUsableSearchIdentity(identity)) return reply.code(400).send({ error: 'identity_not_searchable' });
+    const result = await evaluateIdentity(randomUUID(), identity);
+    return reply.code(200).send(result);
   });
 
   app.get<{ Params: { id: string } }>('/v1/valuations/:id', async (request, reply) => {

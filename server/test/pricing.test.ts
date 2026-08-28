@@ -5,6 +5,7 @@ import { calculateValuation } from '../src/pricing.js';
 
 const identity: Identification = {
   category: 'smartphone', brand: 'Apple', model: 'iPhone 13 Pro', variant: '256GB', condition: 'good',
+  itemForm: 'single_item', quantity: 1, attributes: [{ name: 'storage', value: '256GB' }], conditionNotes: [],
   identifiers: [], identificationConfidence: 0.9, visualEstimateLow: 350, visualEstimateHigh: 450, missingDetails: [], requestedPhoto: null,
 };
 

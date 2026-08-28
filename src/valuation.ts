@@ -19,7 +19,11 @@ export type Identification = {
   brand: string;
   model: string;
   variant: string;
+  itemForm: 'single_item' | 'bundle' | 'accessory' | 'replacement_part' | 'packaging' | 'unknown';
+  quantity: number;
+  attributes: Array<{ name: string; value: string }>;
   condition: 'poor' | 'fair' | 'good' | 'excellent' | 'unknown';
+  conditionNotes: string[];
   identifiers: string[];
   identificationConfidence: number;
   visualEstimateLow: number | null;
@@ -40,6 +44,7 @@ export type ValuationResult = {
     name: string;
     details: string;
   };
+  identification: Identification;
   estimate: {
     low: number;
     high: number;
@@ -54,6 +59,7 @@ export type ResearchResult = {
   status: 'research_only';
   id: string;
   item: { name: string; details: string };
+  identification: Identification;
   estimate: {
     low: number;
     high: number;
@@ -70,6 +76,23 @@ export const previewValuation: ValuationResult = {
   item: {
     name: 'iPhone 13 Pro',
     details: '256GB · Sierra Blue · Good condition',
+  },
+  identification: {
+    category: 'smartphone',
+    brand: 'Apple',
+    model: 'iPhone 13 Pro',
+    variant: '256GB · Sierra Blue',
+    itemForm: 'single_item',
+    quantity: 1,
+    attributes: [{ name: 'storage', value: '256GB' }, { name: 'color', value: 'Sierra Blue' }],
+    condition: 'good',
+    conditionNotes: ['Light visible wear'],
+    identifiers: [],
+    identificationConfidence: 0.89,
+    visualEstimateLow: 395,
+    visualEstimateHigh: 435,
+    missingDetails: ['IMEI/clean status', 'battery health'],
+    requestedPhoto: null,
   },
   estimate: {
     low: 395,

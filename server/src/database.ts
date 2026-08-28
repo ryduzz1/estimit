@@ -66,6 +66,7 @@ function calculateStoredResult(id: string, identity: Identification, estimate: V
       name: `${identity.brand} ${identity.model}`.trim(),
       details: [identity.variant, `${identity.condition[0]!.toUpperCase()}${identity.condition.slice(1)} condition`].filter(Boolean).join(' · '),
     },
+    identification: identity,
     estimate,
     evidence,
     disclosure: 'Sold evidence supports the estimate; active listings are market context only.',

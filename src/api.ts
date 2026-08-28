@@ -2,7 +2,7 @@ import * as SecureStore from 'expo-secure-store';
 import { fetch as expoFetch } from 'expo/fetch';
 import { File } from 'expo-file-system';
 import { Platform } from 'react-native';
-import type { NeedMoreDetail, ResearchResult, ValuationResult } from './valuation';
+import type { Identification, NeedMoreDetail, ResearchResult, ValuationResult } from './valuation';
 
 const API_URL = (process.env.EXPO_PUBLIC_ESTIMIT_API_URL ?? 'https://server.tailc264d2.ts.net:8443').replace(/\/$/, '');
 const INSTALLATION_TOKEN_KEY = 'estimit.installation-token.v1';
@@ -89,6 +89,37 @@ export async function requestValuation(uri: string, hints?: string): Promise<Sca
     if (error instanceof Error && error.name === 'AbortError') throw new ValuationApiError('The scan took too long. Check your connection and try again.');
     console.error('[Estimit API] Scan upload failed', error);
     throw new ValuationApiError('The scan could not be sent. Please try it once more.');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function refineIdentity(identification: Identification): Promise<Extract<ScanOutcome, { kind: 'valuation' | 'research' }>> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const send = (token: string) => expoFetch(`${API_URL}/v1/valuations/refine`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ identification }),
+      signal: controller.signal,
+    });
+    let response = await send(await getInstallationToken());
+    if (response.status === 401) {
+      await clearInstallationToken();
+      response = await send(await registerInstallation());
+    }
+    const payload = await response.json().catch(() => null) as ValuationResult | ResearchResult | { error?: string } | null;
+    if (!response.ok || !payload || !('item' in payload)) {
+      throw new ValuationApiError('Estimit could not update this item match.', response.status);
+    }
+    return payload && 'status' in payload && payload.status === 'research_only'
+      ? { kind: 'research', result: payload }
+      : { kind: 'valuation', result: payload as ValuationResult };
+  } catch (error) {
+    if (error instanceof ValuationApiError) throw error;
+    if (error instanceof Error && error.name === 'AbortError') throw new ValuationApiError('Updating the item took too long. Try again.');
+    throw new ValuationApiError('Estimit could not update this item match.');
   } finally {
     clearTimeout(timeout);
   }

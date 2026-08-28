@@ -4,13 +4,25 @@ import { identificationSchema, type Identification } from './domain.js';
 const outputJsonSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['category', 'brand', 'model', 'variant', 'condition', 'identifiers', 'identificationConfidence', 'visualEstimateLow', 'visualEstimateHigh', 'missingDetails', 'requestedPhoto'],
+  required: ['category', 'brand', 'model', 'variant', 'itemForm', 'quantity', 'attributes', 'condition', 'conditionNotes', 'identifiers', 'identificationConfidence', 'visualEstimateLow', 'visualEstimateHigh', 'missingDetails', 'requestedPhoto'],
   properties: {
     category: { type: 'string' },
     brand: { type: 'string' },
     model: { type: 'string' },
     variant: { type: 'string' },
+    itemForm: { type: 'string', enum: ['single_item', 'bundle', 'accessory', 'replacement_part', 'packaging', 'unknown'] },
+    quantity: { type: 'integer', minimum: 1, maximum: 100 },
+    attributes: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['name', 'value'],
+        properties: { name: { type: 'string' }, value: { type: 'string' } },
+      },
+    },
     condition: { type: 'string', enum: ['poor', 'fair', 'good', 'excellent', 'unknown'] },
+    conditionNotes: { type: 'array', items: { type: 'string' } },
     identifiers: { type: 'array', items: { type: 'string' } },
     identificationConfidence: { type: 'number', minimum: 0, maximum: 1 },
     visualEstimateLow: { type: ['number', 'null'], minimum: 0, maximum: 1000000 },
@@ -25,7 +37,14 @@ const previewIdentification: Identification = {
   brand: 'Apple',
   model: 'iPhone 13 Pro',
   variant: '256GB · Sierra Blue',
+  itemForm: 'single_item',
+  quantity: 1,
+  attributes: [
+    { name: 'storage', value: '256GB' },
+    { name: 'color', value: 'Sierra Blue' },
+  ],
   condition: 'good',
+  conditionNotes: ['Light visible wear'],
   identifiers: [],
   identificationConfidence: 0.89,
   visualEstimateLow: 350,
@@ -64,7 +83,8 @@ export function hasSufficientIdentification(identity: Identification) {
     && !unknown(identity.brand)
     && !unknown(identity.model)
     && !ambiguous(identity.model)
-    && !ambiguous(identity.variant);
+    && !ambiguous(identity.variant)
+    && identity.itemForm !== 'unknown';
 }
 
 export function hasUsableSearchIdentity(identity: Identification) {
@@ -75,7 +95,26 @@ export function hasUsableSearchIdentity(identity: Identification) {
   // Marketplace discovery can be useful with a descriptive item type even when a
   // label, exact variant, or brand is not visible. Keep the stricter 0.8 gate above
   // for any future price calculation backed by completed-sale evidence.
-  return identity.identificationConfidence >= 0.45 && (hasSpecificModel || hasUsefulCategory);
+  return identity.identificationConfidence >= 0.45
+    && identity.itemForm !== 'packaging'
+    && (hasSpecificModel || hasUsefulCategory);
+}
+
+export function targetedPhotoRequest(identity: Identification) {
+  const category = identity.category.toLowerCase();
+  const missing = identity.missingDetails.join(' ').toLowerCase();
+  if (/phone|tablet|computer|laptop|console|electronic/.test(category)) {
+    return /model|serial|storage|identifier|label/.test(missing)
+      ? 'Photograph the model or serial label so the exact version and storage can be read.'
+      : 'Photograph the screen powered on and any visible damage.';
+  }
+  if (/card|trading/.test(category)) return 'Photograph the card straight on so the set symbol, card number, and condition corners are readable.';
+  if (/shoe|sneaker|clothing|apparel/.test(category)) return 'Photograph the size and SKU tag inside the item.';
+  if (/camera|lens/.test(category)) return 'Photograph the model markings around the lens or on the bottom label.';
+  if (/tool/.test(category)) return 'Photograph the model-number label and everything included with the tool.';
+  if (/game/.test(category)) return 'Photograph the front cover and the platform or edition marking.';
+  if (identity.itemForm === 'bundle' || identity.quantity > 1) return 'Lay out every included item in one clear photo.';
+  return identity.requestedPhoto ?? 'Photograph the complete item and any brand, model, barcode, or label.';
 }
 
 export async function identifyItem(image: Buffer, mimeType: string, hints?: string, safetyIdentifier?: string): Promise<Identification> {
@@ -92,7 +131,7 @@ export async function identifyItem(image: Buffer, mimeType: string, hints?: stri
       store: false,
       max_output_tokens: 500,
       ...(safetyIdentifier ? { safety_identifier: safetyIdentifier } : {}),
-      instructions: 'Identify the single resale item shown. Report only visible or strongly supported identity facts. Use unknown or missingDetails instead of guessing identity. Also provide a conservative, broad visualEstimateLow and visualEstimateHigh in current USD resale value based on general secondhand-market knowledge and the visible condition. This is a preliminary visual estimate, not verified comparable-sale evidence. Use null for both estimate fields when the item is not recognizable enough to estimate. The low value must not exceed the high value.',
+      instructions: 'Identify the primary resale item shown. Report only visible or strongly supported facts; use unknown or missingDetails instead of guessing. Classify itemForm carefully: distinguish one complete item from a bundle, accessory, replacement part, or packaging/empty box. Set quantity to the number of materially included sale items. Capture pricing-relevant attributes as name/value pairs, such as storage, size, platform, edition, card number/set, model number, capacity, color, or connectivity. Put only visible condition observations in conditionNotes. requestedPhoto must ask for one specific view that would resolve the most price-relevant missing fact, or null when another photo would not materially improve identification. Also provide a conservative broad visualEstimateLow and visualEstimateHigh in current USD resale value based on general secondhand-market knowledge and visible condition. This is preliminary, not comparable-sale evidence. Use null for both when not recognizable enough. Low must not exceed high.',
       input: [{
         role: 'user',
         content: [

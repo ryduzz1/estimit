@@ -32,6 +32,7 @@ export function calculateValuation(id: string, identity: Identification, evidenc
       name: `${identity.brand} ${identity.model}`.trim(),
       details: [identity.variant, `${identity.condition[0]!.toUpperCase()}${identity.condition.slice(1)} condition`].filter(Boolean).join(' · '),
     },
+    identification: identity,
     estimate: { low, high, currency: 'USD', confidence },
     evidence,
     disclosure: 'Verified completed-sale evidence supports this estimate. Active listings are market context only.',
