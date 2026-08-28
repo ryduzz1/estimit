@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildEbaySearchQuery, mapEbayItems } from '../src/ebay.js';
+import { buildEbaySearchQueries, buildEbaySearchQuery, mapEbayItems } from '../src/ebay.js';
 import type { Identification } from '../src/domain.js';
 
 const identity: Identification = {
@@ -13,7 +13,15 @@ const identity: Identification = {
 
 test('builds category-aware searches with pricing-relevant attributes', () => {
   assert.equal(buildEbaySearchQuery(identity), 'Apple iPhone 13 Pro Sierra Blue 256GB');
+  assert.deepEqual(buildEbaySearchQueries(identity), [
+    'Apple iPhone 13 Pro Sierra Blue 256GB',
+    'Apple iPhone 13 Pro',
+  ]);
   assert.match(buildEbaySearchQuery({ ...identity, itemForm: 'bundle', quantity: 3 }), /lot of 3$/);
+});
+
+test('does not issue a duplicate broad query when the exact query is already broad', () => {
+  assert.deepEqual(buildEbaySearchQueries({ ...identity, variant: '', attributes: [] }), ['Apple iPhone 13 Pro']);
 });
 
 test('normalizes real eBay item summaries into active listing evidence', () => {
@@ -113,4 +121,60 @@ test('keeps descriptive generic items without confusing product materials for re
     buyingOptions: ['FIXED_PRICE'],
   }] }, generic);
   assert.equal(listings.length, 1);
+});
+
+test('rejects component-only laptop and single-earbud listings', () => {
+  const item = (id: string, title: string) => ({
+    itemId: id, title, itemWebUrl: `https://www.ebay.com/itm/${id}`, condition: 'Used',
+    price: { value: '129.99', currency: 'USD' }, buyingOptions: ['FIXED_PRICE'],
+  });
+  const laptopParts = mapEbayItems({ itemSummaries: [
+    item('screen', 'Apple MacBook Pro A1708 13.3in LED LCD Screen Assembly'),
+  ] }, { ...identity, category: 'laptop', model: 'MacBook Pro', variant: '', attributes: [] });
+  const earbudParts = mapEbayItems({ itemSummaries: [
+    item('earbud-a', 'Apple AirPods Pro 2 A3048 Left - OEM'),
+    item('earbud-b', 'Apple AirPods Pro 2nd Generation USB-C Left AirPod Only A3048'),
+    item('earbud-c', 'Earbuds For Apple AirPods Pro 2nd Generation USB-C Type Left Side Only A3048'),
+  ] }, { ...identity, category: 'wireless earbuds', model: 'AirPods Pro', variant: '', attributes: [] });
+  assert.deepEqual(laptopParts, []);
+  assert.deepEqual(earbudParts, []);
+});
+
+test('distinguishes laptop RAM from the requested storage capacity', () => {
+  const laptop: Identification = {
+    ...identity,
+    category: 'laptop',
+    model: 'MacBook Pro',
+    variant: 'Space Gray',
+    attributes: [{ name: 'storage', value: '512GB' }, { name: 'model number', value: 'A2338' }],
+  };
+  const listings = mapEbayItems({ itemSummaries: [{
+    itemId: 'macbook',
+    title: '2020 Apple M1 MacBook Pro 13.3-inch 16GB RAM 512GB SSD Space Gray A2338',
+    itemWebUrl: 'https://www.ebay.com/itm/macbook',
+    condition: 'Used',
+    price: { value: '525', currency: 'USD' },
+    buyingOptions: ['FIXED_PRICE'],
+  }] }, laptop);
+  assert.equal(listings.length, 1);
+});
+
+test('requires a visible model-number attribute and checks provider condition text', () => {
+  const laptop: Identification = {
+    ...identity,
+    category: 'laptop',
+    model: 'MacBook Pro',
+    variant: '',
+    attributes: [{ name: 'model number', value: 'A2338' }],
+  };
+  const item = (id: string, title: string, condition: string) => ({
+    itemId: id, title, condition, itemWebUrl: `https://www.ebay.com/itm/${id}`,
+    price: { value: '500', currency: 'USD' }, buyingOptions: ['FIXED_PRICE'],
+  });
+  const listings = mapEbayItems({ itemSummaries: [
+    item('exact', 'Apple MacBook Pro 2020 A2338 M1 16GB 512GB', 'Used'),
+    item('wrong-model', 'Apple MacBook Pro 2021 A2442 M1 Pro 16GB 512GB', 'Used'),
+    item('parts-condition', 'Apple MacBook Pro 2020 A2338 M1 16GB 512GB', 'For parts or not working'),
+  ] }, laptop);
+  assert.deepEqual(listings.map((listing) => listing.id), ['exact']);
 });

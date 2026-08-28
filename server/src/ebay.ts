@@ -70,9 +70,13 @@ const modelModifiers = new Set(['air', 'elite', 'lite', 'max', 'mini', 'plus', '
 const unwantedSingleItem = /\b(lot of|bundle|wholesale|empty box|box only|manual only|case only|charger only|shell only)\b/i;
 const brokenItem = /\b(for parts|parts only|not working|untested|broken|repair|as is|dead)\b/i;
 const accessoryItem = /\b(case|cover|charger|cable|adapter|screen protector|mount|stand|replacement)\b/i;
+const componentItem = /\b(screen assembly|display assembly|logic board|motherboard|palmrest|trackpad|bottom case)\b/i;
+const singleEarbud = /\b(?:left|right)\s+(?:airpod|earbud|earpiece|pod)\b|\b(?:left|right)(?:\s+side)?\s+only\b|\ba\d{4}\s+(?:left|right)\b/i;
 
 function formMismatch(title: string, identity: Identification) {
-  if (identity.itemForm === 'single_item') return unwantedSingleItem.test(title) || brokenItem.test(title) || accessoryItem.test(title);
+  if (identity.itemForm === 'single_item') {
+    return unwantedSingleItem.test(title) || brokenItem.test(title) || accessoryItem.test(title) || componentItem.test(title) || singleEarbud.test(title);
+  }
   if (identity.itemForm === 'accessory') return brokenItem.test(title);
   if (identity.itemForm === 'replacement_part') return false;
   if (identity.itemForm === 'bundle') return brokenItem.test(title);
@@ -90,10 +94,22 @@ function identityMismatch(title: string, identity: Identification) {
   const offeredModelNumbers = new Set(title.match(/\b\d+\b/g) ?? []);
   if (expectedModelNumbers.size > 0 && offeredModelNumbers.size > 0 && overlap(expectedModelNumbers, offeredModelNumbers) === 0) return true;
 
+  const expectedModelCodes = tokenSet(identity.attributes
+    .filter((attribute) => /^(model|model number)$/i.test(attribute.name.trim()))
+    .map((attribute) => attribute.value)
+    .join(' '));
+  if (expectedModelCodes.size > 0 && overlap(expectedModelCodes, titleTokens) < 1) return true;
+
   const expectedCapacities = capacityValues([identity.variant, ...identity.attributes.map((attribute) => attribute.value)].join(' '));
   const offeredCapacities = capacityValues(title);
   if (expectedCapacities.size > 0 && offeredCapacities.size > 0 && overlap(expectedCapacities, offeredCapacities) === 0) return true;
-  if (expectedCapacities.size > 0 && offeredCapacities.size > expectedCapacities.size) return true;
+  // Computer listings routinely include both RAM and storage (for example 16GB
+  // RAM and 512GB SSD), so multiple capacities are not an ambiguous variant there.
+  // For phones and other products, multiple offered capacities usually mean a
+  // variation listing rather than proof of one exact item.
+  if (!/computer|laptop/.test(identity.category.toLowerCase())
+    && expectedCapacities.size > 0
+    && offeredCapacities.size > expectedCapacities.size) return true;
 
   const expectedModifiers = new Set([...modelTokens].filter((token) => modelModifiers.has(token)));
   const offeredModifiers = new Set([...titleTokens].filter((token) => modelModifiers.has(token)));
@@ -169,6 +185,15 @@ export function buildEbaySearchQuery(identity: Identification) {
     .slice(0, 180);
 }
 
+export function buildEbaySearchQueries(identity: Identification) {
+  const exact = buildEbaySearchQuery(identity);
+  const broadTerms = [identity.brand, identity.model].filter(known);
+  if (broadTerms.length === 0) broadTerms.push(identity.category);
+  if (identity.itemForm === 'bundle' && identity.quantity > 1) broadTerms.push(`lot of ${identity.quantity}`);
+  const broad = broadTerms.join(' ').slice(0, 180);
+  return broad && broad.toLowerCase() !== exact.toLowerCase() ? [exact, broad] : [exact];
+}
+
 export function mapEbayItems(payload: EbaySearchPayload, identity: Identification, observedAt = new Date().toISOString()): MarketEvidence[] {
   const candidates = (payload.itemSummaries ?? []).flatMap((item, index) => {
     const title = text(item.title);
@@ -182,7 +207,7 @@ export function mapEbayItems(payload: EbaySearchPayload, identity: Identificatio
     const condition = text(item.condition);
     const buyingOptions = Array.isArray(item.buyingOptions) ? item.buyingOptions.map(text) : [];
     if (buyingOptions.length > 0 && !buyingOptions.includes('FIXED_PRICE')) return [];
-    if (formMismatch(title, identity) || identityMismatch(title, identity)) return [];
+    if (formMismatch(`${title} ${condition}`, identity) || identityMismatch(title, identity)) return [];
     const score = listingMatchScore(title, condition, identity);
     if (score < 62) return [];
 
@@ -247,23 +272,29 @@ async function applicationToken() {
 export async function findEbayListings(identity: Identification): Promise<MarketEvidence[]> {
   const token = await applicationToken();
   if (!token) return [];
-  const query = buildEbaySearchQuery(identity);
-  const url = new URL('https://api.ebay.com/buy/browse/v1/item_summary/search');
-  url.searchParams.set('q', query);
-  url.searchParams.set('limit', '30');
-  url.searchParams.set('filter', 'buyingOptions:{FIXED_PRICE}');
+  const combined: NonNullable<EbaySearchPayload['itemSummaries']> = [];
 
-  const response = await fetch(url, {
-    headers: {
-      authorization: `Bearer ${token}`,
-      'x-ebay-c-marketplace-id': 'EBAY_US',
-    },
-    signal: AbortSignal.timeout(8_000),
-  });
-  const payload = await response.json().catch(() => null) as EbaySearchPayload | { errors?: Array<{ message?: unknown }> } | null;
-  if (!response.ok) {
-    const message = payload && 'errors' in payload ? text(payload.errors?.[0]?.message) : '';
-    throw new Error(`eBay Browse search failed (${response.status}): ${message || 'search unavailable'}`);
+  for (const query of buildEbaySearchQueries(identity)) {
+    const url = new URL('https://api.ebay.com/buy/browse/v1/item_summary/search');
+    url.searchParams.set('q', query);
+    url.searchParams.set('limit', '30');
+    url.searchParams.set('filter', 'buyingOptions:{FIXED_PRICE}');
+
+    const response = await fetch(url, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        'x-ebay-c-marketplace-id': 'EBAY_US',
+      },
+      signal: AbortSignal.timeout(8_000),
+    });
+    const payload = await response.json().catch(() => null) as EbaySearchPayload | { errors?: Array<{ message?: unknown }> } | null;
+    if (!response.ok) {
+      const message = payload && 'errors' in payload ? text(payload.errors?.[0]?.message) : '';
+      throw new Error(`eBay Browse search failed (${response.status}): ${message || 'search unavailable'}`);
+    }
+    combined.push(...((payload as EbaySearchPayload).itemSummaries ?? []));
+    if (mapEbayItems({ itemSummaries: combined }, identity).length >= 5) break;
   }
-  return mapEbayItems(payload as EbaySearchPayload, identity).slice(0, 8);
+
+  return mapEbayItems({ itemSummaries: combined }, identity).slice(0, 8);
 }
